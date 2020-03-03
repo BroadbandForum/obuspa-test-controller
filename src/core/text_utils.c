@@ -1,6 +1,7 @@
 /*
  *
- * Copyright (C) 2016-2019  ARRIS Enterprises, LLC
+ * Copyright (C) 2019, Broadband Forum
+ * Copyright (C) 2016-2019  CommScope, Inc
  * 
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -40,7 +41,6 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <malloc.h>
 
 #include "common_defs.h"
 #include "str_vector.h"
@@ -94,11 +94,11 @@ int TEXT_UTILS_CalcHash(char *s)
 **************************************************************************/
 int TEXT_UTILS_StringToUnsigned(char *str, unsigned *value)
 {
-    unsigned long lvalue;
+    unsigned long long lvalue;
     int err;
 
     // Exit if unable to convert to an unsigned number
-    err = TEXT_UTILS_StringToUnsignedLong(str, &lvalue);
+    err = TEXT_UTILS_StringToUnsignedLongLong(str, &lvalue);
     if (err != USP_ERR_OK)
     {
         return err;
@@ -145,9 +145,9 @@ int TEXT_UTILS_StringToInteger(char *str, int *value)
 
 /*********************************************************************//**
 **
-** TEXT_UTILS_StringToUnsignedLong
+** TEXT_UTILS_StringToUnsignedLongLong
 **
-** Converts a string to an unsigned long integer (64 bit)
+** Converts a string to an unsigned long long integer (64 bit)
 **
 ** \param   str - string containing value to convert
 ** \param   value - pointer to variable to return converted value in
@@ -156,11 +156,11 @@ int TEXT_UTILS_StringToInteger(char *str, int *value)
 **          USP_ERR_INVALID_TYPE if unable to convert the string
 **
 **************************************************************************/
-int TEXT_UTILS_StringToUnsignedLong(char *str, unsigned long *value)
+int TEXT_UTILS_StringToUnsignedLongLong(char *str, unsigned long long *value)
 {
     char *endptr = NULL;
 
-    // Exit if string contains a negative number (unfortunately sccanf(%u) still happily converts these)
+    // Exit if string contains a negative number
     if (strchr(str, '-') != NULL)
     {
         USP_ERR_SetMessage("%s: '%s' is not a valid unsigned number", __FUNCTION__, str);
@@ -168,8 +168,9 @@ int TEXT_UTILS_StringToUnsignedLong(char *str, unsigned long *value)
     }
 
     // Exit if unable to convert
-    *value = strtoul(str, &endptr, 10);
-    if ((endptr == NULL) || (*endptr != '\0'))
+    errno = 0;
+    *value = strtoull(str, &endptr, 10);
+    if ((endptr == NULL) || (*endptr != '\0') || (errno != 0))
     {
         USP_ERR_SetMessage("%s: '%s' is not a valid unsigned number", __FUNCTION__, str);
         return USP_ERR_INVALID_TYPE;
@@ -421,6 +422,7 @@ int TEXT_UTILS_StringToIpAddr(char *str, nu_ipaddr_t *ip_addr)
     err = nu_ipaddr_from_str(str, ip_addr);
     if (err != USP_ERR_OK)
     {
+        USP_ERR_SetMessage("%s: Unable to convert IP address (%s)", __FUNCTION__, str);
         return USP_ERR_INVALID_TYPE;
     }
 
@@ -447,14 +449,24 @@ void TEXT_UTILS_SplitString(char *str, str_vector_t *sv, char *separator)
     char *end;
     char *trimmed;
     int sep_len;
+    char buf[MAX_DM_VALUE_LEN];
 
     // Initialise the string vector to an empty list
     STR_VECTOR_Init(sv);
 
+    // Exit if the input string is empty - nothing to do
+    if (*str == '\0')
+    {
+        return;
+    }
+
+    // Copy into a local buffer, as we will be making inline changes to the string
+    USP_STRNCPY(buf, str, sizeof(buf));
+
     // Iterate over all strings delimited by the separator
     // 2DO RH: This function can be made to ignore separators present in the string within quotes by creating a special version of strstr
     sep_len = strlen(separator);
-    start = str;
+    start = buf;
     end = TEXT_UTILS_StrStr(start, separator);
     while (end != NULL)
     {
@@ -483,10 +495,37 @@ void TEXT_UTILS_SplitString(char *str, str_vector_t *sv, char *separator)
 
 /*********************************************************************//**
 **
+** TEXT_UTILS_StrncpyLen
+**
+** Performs a strncpy() of a source string whose length is specified (rather than being NULL terminated)
+**
+** \param   dst - pointer to buffer to copy source string into
+** \param   dst_len - length of the destination buffer
+** \param   src - pointer to buffer containing string to copy
+** \param   src_len - length of the source buffer
+**
+** \return  None
+**
+**************************************************************************/
+void TEXT_UTILS_StrncpyLen(char *dst, int dst_len, char *src, int src_len)
+{
+    // Deal with case of truncating src string to fit in destination buffer
+    if (dst_len < src_len + 1)      // Plus 1 to include NULL terminator
+    {
+        src_len = dst_len - 1;      // Minus 1 to include NULL terminator
+    }
+
+    // Copy the src string into the destination buffer and NULL terminate it
+    memcpy(dst, src, src_len);
+    dst[src_len] = '\0';
+}
+
+/*********************************************************************//**
+**
 ** TEXT_UTILS_StrStr
 **
 ** Finds the first occurrence of the string 'needle' in the string 'haystack'
-** NOTE: This differes from the standard library implementation of ststr() in that it skips sub strings
+** NOTE: This differs from the standard library implementation of ststr() in that it skips sub strings
 **       enclosed in quotes, embedded in haystack. Thus quoted substrings within haystack may contain 'needle'
 **       This is useful for eg ServerSelection diagnostics driven from USP Agent CLI, as HostList also
 **       contains the separator character (',')
@@ -639,6 +678,106 @@ char *TEXT_UTILS_SplitPathAtSeparator(char *path, char *buf, int len, int separa
 
 /*********************************************************************//**
 **
+** TEXT_UTILS_KeyValueFromString
+**
+** Parses a line (read from a file) that contains two strings (a key and a value) separated by whitespace
+** NOTE: The key and value are contained in the line buffer. The line buffer is modified by this function.
+**
+** \param   buf - pointer to buffer containing the line read from the file
+** \param   key - pointer to variable in which to return a pointer to the key
+** \param   value - pointer to variable in which to return a pointer to the value
+**
+** \return  USP_ERR_OK if no error occurred.
+**          NOTE: Even if no error occurred, key and value may be returned as NULL, if the line is empty or a comment
+**
+**************************************************************************/
+int TEXT_UTILS_KeyValueFromString(char *buf, char **key, char **value)
+{
+    char *p;
+    int len;
+    int key_len;
+    
+    // Set default return parameters
+    *key = NULL;
+    *value = NULL;
+    
+    // Exit if this line is a comment - nothing more to do
+    if (buf[0] == '#')
+    {
+        return USP_ERR_OK;
+    }
+
+    // Truncate string at newline
+    p = strchr(buf, '\n');
+    if (p != NULL)
+    {
+        *p = '\0';
+    }
+    
+    // Truncate string at carriage return
+    p = strchr(buf, '\r');
+    if (p != NULL)
+    {
+        *p = '\0';
+    }
+    
+    // Skip leading whitespace
+    #define WHITESPACE_CHARS " \t"
+    len = strspn(buf, WHITESPACE_CHARS);
+    if (len != 0)
+    {
+        buf += len;
+    }
+
+    // Find extent of key
+    key_len = strcspn(buf, WHITESPACE_CHARS);
+    if (key_len == 0)
+    {
+        // Skip empty lines
+        return USP_ERR_OK;
+    }
+
+
+    // Exit if no value has been specified
+    p = TEXT_UTILS_TrimBuffer(&buf[key_len]);
+    if (*p == '\0')
+    {
+        USP_LOG_Error("%s: No value specified for line '%s'", __FUNCTION__, buf);
+        return USP_ERR_INTERNAL_ERROR;
+    }
+
+    // Exit if value was enclosed in speech marks at one end, but not the other
+    #define SPEECH_MARK '\"'
+    len = strlen(p);
+    if ((*p == SPEECH_MARK) && (p[len-1]) != SPEECH_MARK)
+    {
+        USP_LOG_Error("%s: Expected \" at end of parameter value (%s)", __FUNCTION__, p);
+        return USP_ERR_INTERNAL_ERROR;
+    }
+
+    if ((*p != SPEECH_MARK) && (p[len-1]) == SPEECH_MARK)
+    {
+        USP_LOG_Error("%s: Expected \" at start of parameter value (%s)", __FUNCTION__, p);
+        return USP_ERR_INTERNAL_ERROR;
+    }
+
+    // Trim value of speech marks (if present)
+    if (*p == SPEECH_MARK)
+    {
+        p[len-1] = '\0';
+        p++;
+    }
+
+    // Null terminate the key string and setup return values
+    buf[key_len] = '\0';
+    *key = buf;
+    *value = p;
+
+    return USP_ERR_OK;
+}
+
+/*********************************************************************//**
+**
 ** TEXT_UTILS_NullStringCompare
 **
 ** Compares two strings, treating string pointers which are NULL as equal
@@ -679,8 +818,7 @@ int TEXT_UTILS_NullStringCompare(char *str1, char *str2)
 **
 ** \param   buf - pointer to buffer containing string to trim
 **
-** \return  USP_ERR_OK if validated successfully
-**          USP_ERR_INVALID_TYPE if string value does not represent an unsigned integer
+** \return  pointer to string in buffer
 **
 **************************************************************************/
 char *TEXT_UTILS_TrimBuffer(char *buf)
@@ -724,24 +862,90 @@ char *TEXT_UTILS_TrimBuffer(char *buf)
 
 /*********************************************************************//**
 **
-** TEXT_UTILS_UnescapeString
+** TEXT_UTILS_PercentEncodeString
+**
+** Converts any non-reserved characters in the input string to percent escaped characters in the output buffer
+**
+** \param   src - pointer to buffer containing string to percent encode
+** \param   dst - pointer to buffer in which to store the percent encoded output string
+** \param   dst_len - length of buffer in which to store the percent encoded output string
+** \param   safe_char - character which should not be percent encoded
+**
+** \return  None
+**
+**************************************************************************/
+void TEXT_UTILS_PercentEncodeString(char *src, char *dst, int dst_len, char safe_char)
+{
+    char c;
+    bool is_unreserved;
+    int num_required;
+
+    // Reserve space in the destination buffer for a trailing NULL terminator
+    USP_ASSERT(dst_len > 0);    
+    dst_len--;
+    
+    c = *src++;
+    while (c != '\0')
+    {
+        // Determine if character is a unreserved character
+        is_unreserved =  IS_ALPHA_NUMERIC(c) || (c=='.') || (c=='~');
+
+        // Override for safe character, this is always left unencoded
+        if (c == safe_char)
+        {
+            is_unreserved = true;
+        }
+
+        // Exit loop if there is not enough space for the (potentially escaped) character in the output buffer
+        num_required = (is_unreserved) ? 1 : 3;
+        if (dst_len < num_required)
+        {
+            goto exit;
+        }
+
+        if (is_unreserved)
+        {
+            // Unreserved characters do not have to be percent encoded
+            *dst++ = c;
+        }
+        else
+        {
+            *dst++ = '%';
+            *dst++ = TEXT_UTILS_ValueToHexDigit( BITS(7, 4, c));
+            *dst++ = TEXT_UTILS_ValueToHexDigit( BITS(3, 0, c));
+        }
+
+        // Decrement space left in the output buffer and move to next input character
+        dst_len -= num_required;
+        c = *src++;
+    }
+
+exit:
+    // Ensure the destination buffer is NULL terminated
+    *dst = '\0';
+}
+
+/*********************************************************************//**
+**
+** TEXT_UTILS_PercentDecodeString
 **
 ** Converts any percent escaped characters within a string buffer back to their character
 ** The changes to the string are made in-place within the input buffer
+** NOTE: Badly formed percent encoded characters are ignored. This makes the code more 
+**       robust if the originator did not realise that the string had to be percent encoded
+**       For example: If the string contains a '%' character, but the originator forgot to percent encode it
 **
 ** \param   buf - pointer to buffer containing string to trim
 **
-** \return  NULL if a 2 digit hex value did not follow any percent, otherwise buf
+** \return  None
 **
 **************************************************************************/
-char *TEXT_UTILS_UnescapeString(char *buf)
+void TEXT_UTILS_PercentDecodeString(char *buf)
 {
     char c;
     char *src;
     char *dest;
-    char hex1, hex2;
     int digit1, digit2;
-    char unescaped;
 
     src = buf;
     dest = buf;
@@ -750,51 +954,104 @@ char *TEXT_UTILS_UnescapeString(char *buf)
     {
         if (c == '%')
         {
-            // Exit if string ends in a trailing '%' without a 2 digit trailing hex number following
-            src++;
-            hex1 = *src++;
-            if (hex1 == '\0')
+            // Skip this percent if string ends in a trailing '%' without a 2 digit trailing hex number following
+            src++;      // Consume the percent character from the input
+            if ((src[0] == '\0') || (src[1] == '\0'))
             {
-                return NULL;
+                *dest++ = '%';
+                goto next;
             }
 
-            hex2 = *src++;
-            if (hex2 == '\0')
-            {
-                return NULL;
-            }
-
-            // Exit if not a valid hex number            
-            digit1 = TEXT_UTILS_HexDigitToValue(hex1);
-            digit2 = TEXT_UTILS_HexDigitToValue(hex2);
+            // Skip this percent if following 2 digits don't form a hex number
+            digit1 = TEXT_UTILS_HexDigitToValue(src[0]);
+            digit2 = TEXT_UTILS_HexDigitToValue(src[1]);
             if ((digit1 == INVALID) || (digit2==INVALID))
             {
-                return NULL;
+                *dest++ = '%';
+                goto next;
             }
 
-            unescaped = (char)(16*digit1 + digit2);
-            *dest++ = unescaped;
+            src += 2;   // Consume the 2 digits from the input
+            *dest++ = (char)(16*digit1 + digit2);
         }
         else
         {
             // Copy down characters
-            if (dest != src)
-            {
-                *dest = *src;
-            }
-
-            // Move to next character
             src++;
-            dest++;
+            *dest++ = c;
         }
 
+next:
         c = *src;
     }
 
     // If the code gets here, we have stepped through all characters in the string converting them
     // So terminate the string
     *dest = '\0';
-    return buf;
+}
+
+/*********************************************************************//**
+**
+** TEXT_UTILS_ReplaceCharInString
+**
+** Replaces all occurrences of the specified character with the specified string
+**
+** \param   src - pointer to string to convert
+** \param   match_char - character to replace
+** \param   replacement - pointer to string containing replacement characters for the match_char
+** \param   dst - pointer to buffer in which to write the converted string
+** \param   dst_len - length of buffer in which to write the converted string
+**
+** \return  NULL if a 2 digit hex value did not follow any percent, otherwise buf
+**
+**************************************************************************/
+void TEXT_UTILS_ReplaceCharInString(char *src, char match_char, char *replacement, char *dst, int dst_len)
+{
+    char c;
+    int replacement_len;
+
+    // Reserve space for a trailing NULL in the destination buffer
+    dst_len--;
+
+    replacement_len = strlen(replacement);
+
+    // Iterate over all characters in the source string, replacing matches
+    c = *src++;
+    while (c != '\0')
+    {
+        if (c == match_char)
+        {
+            // Found the specified character to replace
+            // Exit loop if no enough space to store the replacement
+            if (replacement_len > dst_len)
+            {
+                break;
+            }
+
+            // Store the replacement
+            memcpy(dst, replacement, replacement_len);
+            dst += replacement_len;
+            dst_len -= replacement_len;
+        }
+        else
+        {
+            // If not the specified character to replace, then just copy across the current source character
+            *dst++ = c;
+            dst_len--;
+        }
+
+        // Exit if the destination buffer is full
+        if (dst_len == 0)
+        {
+            break;
+        }
+
+        // Move to the next character in the input string
+        c = *src++;
+    }
+
+    // Ensure destination string is always NULL terminated
+    *dst = '\0';
 }
 
 /*********************************************************************//**
@@ -887,73 +1144,6 @@ char TEXT_UTILS_ValueToHexDigit(int nibble)
 
     // If the code gets here then the digit could not be converted
     return 'X';
-}
-
-/*********************************************************************//**
-**
-** TEXT_UTILS_ToJSONFormat
-**
-** Converts a buffer in-place to a JSON value formatted string
-** The string is quoted and certain characters are escaped
-**
-** \param   buf - buffer containing the value to convert
-** \param   len - length of the buffer available to store the value
-**
-** \return  USP_ERR_OK if successful.
-**
-**************************************************************************/
-int TEXT_UTILS_ToJSONFormat(char *buf, int len)
-{
-    int count;
-    int str_len;
-    char *src;
-    char *dest;
-    char c;
-    int i;
-
-    // Determine the number of characters to add to the buffer
-    str_len = strlen(buf);
-    count = 2;      // Starts from 2, because we need to add quote characters at the start and end
-    src = buf;
-    for (i=0; i<str_len; i++)
-    {
-        c = *src++;
-        #define IS_CHAR_TO_ESCAPE(c)    ((c == '\"') || (c == '\\'))
-        if (IS_CHAR_TO_ESCAPE(c))
-        {
-            count++;
-        }
-    }
-
-    // Exit if there is not enough space in the buffer to store the JSON string
-    if (str_len + count + 1 > len)  // Plus 1 to include NULL terminator
-    {
-        USP_ERR_SetMessage("%s: Internal buffer not large enough to contain JSON formatted string value (got %d, requires %d chars)", __FUNCTION__, len, str_len + count);
-        return USP_ERR_INTERNAL_ERROR;
-    }
-
-    // Make space in the buffer to store the extra characters
-    // This ensures that the loop below never ends up overwriting the characters which it is about to copy
-    memmove(&buf[count], buf, str_len);
-
-    // Convert the string
-    dest = buf;
-    src = &buf[count];
-    *dest++ = '\"';         // String starts with a quote
-    for (i=0; i<str_len; i++)
-    {
-        // Add extra escape characters before certain characters
-        c = *src++;
-        if (IS_CHAR_TO_ESCAPE(c))
-        {
-            *dest++ = '\\';
-        }
-        *dest++ = c;
-    }
-    *dest++ = '\"';         // String ends with a quote
-    *dest++ = '\0';
-
-    return USP_ERR_OK;
 }
 
 /*********************************************************************//**
@@ -1112,9 +1302,10 @@ void TestTrimBuffer(void)
 #endif
 
 //------------------------------------------------------------------------------------------
-// Code to test the TEXT_UTILS_UnescapeString() function
+// Code to test the TEXT_UTILS_PercentDecodeString() function
+// NOTE '%25' (ASCII character 0x25) is the '%' character, '%2A' is '*', and '%3D' is '='
 #if 0
-char *unescape_string_test_cases[] =
+char *percent_decode_string_test_cases[] =
 {
     // Test case                // Expected result
     "",      "",
@@ -1123,27 +1314,35 @@ char *unescape_string_test_cases[] =
     "one%25",       "one%",
     "%25one",       "%one",
     "one%25two%25three%25four",       "one%two%three%four",
-    "one%2two",       NULL,
-    "one%",       NULL,
-    "one%2",       NULL,
-    "one%X2two",       NULL,
-    "one%2Xtwo",       NULL,
+    "one%2two",   "one%2two",
+    "one%",       "one%",
+    "one%2",      "one%2",
+    "one%X2two",       "one%X2two",
+    "one%2Xtwo",       "one%2Xtwo",
     "one%22two",       "one\"two",
+    "one%2Atwo",       "one*two",
+    "one%2atwo",       "one*two",
+    "one%3Dtwo",       "one=two",
+    "one%2atwo%",       "one*two%",
+    "one%2atwo%2",       "one*two%2",
+    "one%2atwo%2a",       "one*two*",
+    "one%2atwo%2at",       "one*two*t",
+    "one%2atwo%%2a",       "one*two%*",
+    "one%2atwo%%2at",       "one*two%*t",
 };
 
-void TestUnescapeString(void)
+void TestPercentDecodeString(void)
 {
     int i;
-    char *s;
     char buf[256];
 
-    for (i=0; i < NUM_ELEM(unescape_string_test_cases); i+=2)
+    for (i=0; i < NUM_ELEM(percent_decode_string_test_cases); i+=2)
     {
-        strcpy(buf, unescape_string_test_cases[i]);
-        s = TEXT_UTILS_UnescapeString(buf);
-        if (TEXT_UTILS_NullStringCompare(s, unescape_string_test_cases[i+1]) != 0)
+        strcpy(buf, percent_decode_string_test_cases[i]);
+        TEXT_UTILS_PercentDecodeString(buf);
+        if (strcmp(buf, percent_decode_string_test_cases[i+1]) != 0)
         {
-            printf("ERROR: [%d] Test case result for '%s' is '%s' (expected '%s')\n", i/2, unescape_string_test_cases[i], s, unescape_string_test_cases[i+1]);
+            printf("ERROR: [%d] Test case result for '%s' is '%s' (expected '%s')\n", i/2, percent_decode_string_test_cases[i], buf, percent_decode_string_test_cases[i+1]);
         }
     }
 }
@@ -1258,7 +1457,7 @@ void TestStrStr(void)
 
 //------------------------------------------------------------------------------------------
 // Code to test the TEXT_UTILS_PathToSchemaForm() function
-#if 1
+#if 0
 char *schema_form_test_cases[] =
 {
     // Test case                    // Expected value
@@ -1292,3 +1491,179 @@ void Test_ToSchemaForm(void)
     printf("Number of failures=%d\n", count);
 }
 #endif
+
+//------------------------------------------------------------------------------------------
+// Code to test the TEXT_UTILS_KeyValueFromString() function
+#if 0
+char *to_key_value_test_cases[] =
+{
+    // Test case                            // Expected key     // Expected value
+    "my.key \"  my value \"   \t",          "my.key",           "  my value ",
+    "my.key \"\"   \t",                     "my.key",           "",
+    "my.key \"stuff",                       NULL,               NULL,
+    "my.key stuff\"",                       NULL,               NULL,
+    "my.key  \"stuff\"  ",                  "my.key",           "stuff",
+    "my.key    \t",                         NULL,               NULL,
+    "my.key",                               NULL,               NULL,
+    "mykey myvalue\n",                      "mykey",            "myvalue",
+    "    \t  mykey   myvalue\n",            "mykey",            "myvalue",
+    "my.key  \t  my very long value\r\n",   "my.key",           "my very long value",
+    "# Ignore this line\r",                 NULL,               NULL,
+    "",                                     NULL,               NULL,
+    "\n",                                   NULL,               NULL,
+    "\r\n",                                 NULL,               NULL,
+    "  \t  ",                               NULL,               NULL,
+};
+
+void Test_ToKeyValue(void)
+{
+    int i;
+    int err;
+    char *key;
+    char *value;
+    int count = 0;
+    char buf[256];
+
+    for (i=0; i < NUM_ELEM(to_key_value_test_cases); i+=3)
+    {
+        printf("[%d] '%s'\n", i/3, to_key_value_test_cases[i]);
+        USP_STRNCPY(buf, to_key_value_test_cases[i], sizeof(buf));
+
+        err = TEXT_UTILS_KeyValueFromString(buf, &key, &value);
+
+        // Check that returned key is correct
+        if (to_key_value_test_cases[i+1] != NULL)
+        {
+            if (strcmp(key, to_key_value_test_cases[i+1]) != 0)
+            {
+                printf("FAIL: [%d] Test case result is wrong for key (got '%s', expected '%s')\n", i/3, key, to_key_value_test_cases[i+1]);
+                count++;
+            }
+        }
+        else
+        {
+            if (key != NULL)
+            {
+                printf("FAIL: [%d] Test case result is wrong for key (got '%s', expected NULL)\n", i/3, key);
+                count++;
+            }
+        }
+   
+        // Check that returned value is correct
+        if (to_key_value_test_cases[i+2] != NULL)
+        {
+            if (strcmp(value, to_key_value_test_cases[i+2]) != 0)
+            {
+                printf("FAIL: [%d] Test case result is wrong for value (got '%s', expected '%s')\n", i/3, value, to_key_value_test_cases[i+2]);
+                count++;
+            }
+        }
+        else
+        {
+            if (value != NULL)
+            {
+                printf("FAIL: [%d] Test case result is wrong for value (got '%s', expected NULL)\n", i/3, value);
+                count++;
+            }
+        }
+   
+        if (err != USP_ERR_OK)
+        {
+            if ((key != NULL) || (value != NULL))
+            {
+                printf("FAIL: [%d] Test case returned err=%d, but key=%p, value=%p (expected NULL)", i/3, err, key, value);
+                count++;
+            }
+        }
+    }
+    printf("Number of failures=%d\n", count);
+}
+#endif
+
+//------------------------------------------------------------------------------------------
+// Code to test the TEXT_UTILS_ReplaceCharInString() function
+
+#if 0
+char *replace_char_test_cases[] =
+{
+    // Test case                // Expected value when destination buffer is 10 characters
+    "os::controller1",              "os\\c\\ccon",
+    "os::c1",                       "os\\c\\cc1",
+    "1234567:",                     "1234567\\c",
+    "12345678:",                    "12345678",
+    ":::a::::::",                   "\\c\\c\\ca\\c",
+};
+
+void Test_ReplaceCharInString(void)
+{
+    int i;
+    int count = 0;
+    char buf[10];
+
+    for (i=0; i < NUM_ELEM(replace_char_test_cases); i+=2)
+    {
+        
+        TEXT_UTILS_ReplaceCharInString(replace_char_test_cases[i], ':', "\\c", buf, sizeof(buf));
+
+        printf("[%d] '%s' => '%s'\n", i/2, replace_char_test_cases[i], buf);
+        if (strcmp(buf, replace_char_test_cases[i+1]) != 0)
+        {
+            printf("FAIL: [%d] Test case result is wrong (got '%s', expected '%s')\n", i/2, buf, replace_char_test_cases[i+1]);
+            count++;
+        }
+    }
+
+    printf("Number of failures=%d\n", count);
+}
+#endif
+
+
+//------------------------------------------------------------------------------------------
+// Code to test the TEXT_UTILS_PercentEncodeString() function
+// NOTE '%25' (ASCII character 0x25) is the '%' character
+#if 0
+char *percent_encode_string_test_cases[] =
+{
+    // Test case                // Expected result
+//    "",                         "",
+//    "one",                      "one",
+    "one%two",                  "one%25two",
+    "one%",                     "one%25",
+    "%one",                     "%25one",
+
+    "one\"two",                 "one%22two",
+    "one%two%three%four%five",  "one%25two%25thr",
+
+    // Check that unreserved characters aren't encoded
+    "abcdefghijklmno",          "abcdefghijklmno",
+    "pqrstuvwxyz",              "pqrstuvwxyz",
+    "ABCDEFGHIJKLMNO",          "ABCDEFGHIJKLMNO",
+    "PQRSTUVWXYZ",              "PQRSTUVWXYZ",
+    "0123456789-_.~",           "0123456789-_.~",
+
+    // check that we don't overflow output buffer (16 characters)
+    "onetwothreefour%five",     "onetwothreefour",
+    "onetwothreefou%rfive",     "onetwothreefou",
+    "onetwothreefo%urfive",     "onetwothreefo",
+    "onetwothreef%ourfive",     "onetwothreef%25",
+    "onetwothree%fourfive",     "onetwothree%25f",
+    "a/@/r",                    "a/%40/r",
+};
+
+void TestPercentEncodeString(void)
+{
+    int i;
+    char buf[16];
+
+    for (i=0; i < NUM_ELEM(percent_encode_string_test_cases); i+=2)
+    {
+        strcpy(buf, percent_encode_string_test_cases[i]);
+        TEXT_UTILS_PercentEncodeString(percent_encode_string_test_cases[i], buf, sizeof(buf), '/');
+        if (strcmp(buf, percent_encode_string_test_cases[i+1]) != 0)
+        {
+            printf("ERROR: [%d] Test case result for '%s' is '%s' (expected '%s')\n", i/2, percent_encode_string_test_cases[i], buf, percent_encode_string_test_cases[i+1]);
+        }
+    }
+}
+#endif
+

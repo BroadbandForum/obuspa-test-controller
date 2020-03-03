@@ -1,4 +1,7 @@
 # Quick Start Guide
+## Test Controller Instructions
+The code associated with this guide is the OB-USP-Agent code with a very simple test controller function added to it. The test controller function uses the Agent functionality for all aspects of setting up connections and creating and sending USP Messages. To use the controller function, the code must be installed and configured exactly like an Agent. The sections of this document below this one are the exact QUICK_START_GUIDE.md for OB-USP-Agent. Once the Agent is installed and configured according to these instructions, see CONTROLLER_SETUP.md for specific instructions related to the test controller function.
+
 ## Audience
 This document supports two target audiences:
 * Integrator  - Someone who is taking OB-USP-AGENT and integrating it into a device.
@@ -9,35 +12,20 @@ This document supports two target audiences:
 ## Document conventions
 When referring to source code functions, this document will often use 'XXX' to represent a set of possible function names.
 For example,  DEVICE_XXX_Init() refers to a set of functions:
- DEVICE_STOMP_Init()
- DEVICE_MTP_Init()
- DEVICE_CONTROLLER_Init()
- etc
+ * DEVICE_STOMP_Init()
+ * DEVICE_MTP_Init()
+ * DEVICE_CONTROLLER_Init()
+ * etc
 
 
 ## Building OB-USP-AGENT
-1. Install dependencies (Curl, OpenSSL, Sqlite, C-Ares, z-lib) using package manager:
+1. Install dependencies (Curl, OpenSSL, Sqlite, z-lib, autotools) using package manager:
 ```
-$ sudo apt-get install libssl-dev libcurl4-openssl-dev libsqlite3-dev libc-ares-dev libz-dev
-```
-
-2. Install libcoap from source:
-```
-$ wget https://github.com/obgm/libcoap/archive/bsd-licensed.tar.gz
-$ tar -xvf bsd-licensed.tar.gz
-$ cd libcoap-bsd-licensed
-$ ./autogen.sh
-$ ./configure --disable-examples
-$ make
-$ sudo make install
+$ sudo apt-get install libssl-dev libcurl4-openssl-dev libsqlite3-dev libz-dev autoconf automake libtool
 ```
 
-3. IMPORTANT: Modify the DEFAULT_WAN_IFNAME define in src/vendor/vendor_defs.h, if you intend to run on
-a device which does not have a network interface named "eth0".
-
-4. Install ob_uspagent from source:
+2. Install OB-USP-AGENT from source:
 ```
-$ cd ob_uspagent
 $ autoreconf --force --install
 $ ./configure
 $ make
@@ -48,24 +36,29 @@ $ sudo make install
 ## Running OB-USP-AGENT for the first time
 Before OB-USP-AGENT starts, it needs a database containing the settings of the USP controller to contact.
 This is known as the 'factory reset database'.
-This database may be created using 'ob_uspagent -c dbset' commands (see next section), or may be created programatically by
-ob_uspagent when it first runs (if no database file exists). To start with, use the latter option, as many parameters
-in the factory reset database have boiler plate values.
+This database may be created using either:
+* 'obuspa -c dbset' commands (see next section)
+* code in vendor_factory_reset_example.c (if INCLUDE_PROGRAMMATIC_FACTORY_RESET is defined in vendor_defs.h)
+* a text file located by the '-r' option
 
-To specify the data model parameters and values used to create the factory reset database, modify the 
-code in vendor_factory_reset_example.c. You will need to modify the STOMP connection parameters and the USP EndpointID of
-the controller to connect to.
+To start with, use the last option, as this is the simplest method.
 
-Then to run OB-USP-AGENT with protocol trace, and full trace logging to stdout:
+If OB-USP-AGENT cannot find a database when it starts up, then it will create one using the parameter values specified in the file located by the '-r' option.
+
+To specify the data model parameters and values used to create the factory reset database, modify factory_reset_example.txt. You will need to modify the STOMP connection parameters and the USP EndpointID of the controller to connect to.
+
+When using this option, to prevent the code in vendor_factory_reset_example.c from overriding the values specified in the file located by the '-r' option, ensure that INCLUDE_PROGRAMMATIC_FACTORY_RESET is undefined in vendor_defs.h.
+
+To create the database and run OB-USP-AGENT connecting to a STOMP server from network interface eth0 with protocol and trace logging enabled to stdout, use the following command:
 ```
-$ ob_uspagent -p -v 4
+$ obuspa -p -v 4 -r factory_reset_example.txt -i eth0
 ```
 
 If OB-USP-AGENT successfully connected to your STOMP server you should see trace like the following on stdout:
 
 ```
-   Attempting to connect to host=controller1 (port=61613, unencrypted) from interface=enp0s3
-   Connected to 127.0.0.1 (host=controller1, port=61613) from interface=enp0s3
+   Attempting to connect to host=controller1 (port=61613, unencrypted) from interface=eth0
+   Connected to 127.0.0.1 (host=controller1, port=61613) from interface=eth0
    Sending STOMP frame to (host=controller1, port=61613)
    STOMP
    accept-version:1.2
@@ -92,18 +85,22 @@ If OB-USP-AGENT successfully connected to your STOMP server you should see trace
 ```
 
 If OB-USP-AGENT failed to connect, review the settings in your factory reset database and the STOMP server.
-If you subsequently change the settings in vendor_factory_reset_example.c, then you must delete the database,
-in order that the database is re-created the next time you run ob_uspagent.
+If you subsequently change the settings in factory_reset_example.txt, then you must delete the database,
+in order that the database is re-created the next time you run OB-USP_AGENT.
 To delete the database in the default location:
 ```
-$ rm /tmp/usp.db
+$ rm /usr/local/var/obuspa/usp.db
 ```
 
-Alternatively you can use the 'ob_uspagent -c dbset' command (see next section) to alter parameters
+Alternatively you can use the 'obuspa -c dbset' command (see next section) to alter parameters
 in the database, and try again.
 
-OB-USP_AGENT also supports an basic implementation of CoAP MTP. As with STOMP MTP, this is enabled
+## CoAP Message Transfer Protocol
+OB-USP-AGENT also supports CoAP MTP. As with STOMP MTP, this is enabled
 by setting data model parameters in the relevant CoAP MTP data model objects.
+
+**IMPORTANT**
+When using CoAP over DTLS, OB-USP-AGENT must have a client certificate (e.g. using the '--authcert' option).
 
 
 ## OB-USP-AGENT Command Line Arguments
@@ -112,45 +109,45 @@ querying the data model and setting values in the database. The CLI mode is spec
 
 * To see a list of arguments use:
 ```
-$ ob_uspagent --help
+$ obuspa --help
 ```
 
 * To see a list of commands supported in CLI mode use:
 ```
-$ ob_uspagent -c help
+$ obuspa -c help
 ```
 
 * To see the currently implemented USP data model use:
 ```
-$ ob_uspagent -c show datamodel
+$ obuspa -c show datamodel
 ```
 
 * To see all data model parameters stored in the database:
 ```
-$ ob_uspagent -c show database
+$ obuspa -c show database
 ```
 
 * To set the value of a data model parameter in the database use:
 ```
-$ ob_uspagent -c dbset "parameter" "value"
+$ obuspa -c dbset "parameter" "value"
 ```
 IMPORTANT: This command must only be run when there is no daemon instance of OB-USP-AGENT running,
 as it directly alters the value in the database without notifying a running daemon of the change.
 
 * To set the value of a data model parameter when the daemon is running use:
 ```
-$ ob_uspagent -c set "parameter" "value"
+$ obuspa -c set "parameter" "value"
 ```
 
 * To query the value of a parameter when the daemon is running use:
 ```
-$ ob_uspagent -c get "parameter"
+$ obuspa -c get "parameter"
 ```
 
 The "parameter" may contain USP search expressions and partial paths.
 For example, to query the value of all parameters in the DeviceInfo object when the daemon is running use:
 ```
-$ ob_uspagent -c get "Device.DeviceInfo."
+$ obuspa -c get "Device.DeviceInfo."
 ```
 
 The CLI mode also supports adding and deleting instances of data model objects and running USP commands.
@@ -287,16 +284,7 @@ The typedefs for each of the core vendor hook callbacks are declared in src/incl
 The following core vendor hooks are most likely to need overriding:
 * reboot_cb - called by OB-USP-AGENT core to reboot the device after receiving a Device.Reboot() command
 * factory_reset_cb - called by OB-USP-AGENT core to perform a factory reset after receiving a Device.FactoryReset() command
-* get_trust_store_cb - called by OB-USP-AGENT core to get the list of SSL certificates to install in OB-USP-AGENT's trust store
-* get_agent_cert_cb - called by OB-USP-AGENT core to get the SSL client certificate associated with this device
+* get_trust_store_cb - called by OB-USP-AGENT core to get the list of SSL certificates to install in OB-USP-AGENT's trust store. These can alternatively be specified using the '-t' option when invoking OB-USP-AGENT.
+* get_agent_cert_cb - called by OB-USP-AGENT core to get the SSL client certificate and private key associated with this device. This can alternatively be specified using the '-a' option when invoking OB-USP-AGENT.
 
 Certificates provided to the get_trust_store_cb() and get_agent_cert_cb() must be in DER (binary) form.
-
-
-
-
-
-
-
-
-

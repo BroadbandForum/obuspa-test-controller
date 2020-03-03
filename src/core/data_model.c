@@ -1,6 +1,7 @@
 /*
  *
- * Copyright (C) 2016-2019  ARRIS Enterprises, LLC
+ * Copyright (C) 2019, Broadband Forum
+ * Copyright (C) 2016-2019  CommScope, Inc
  * 
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -40,7 +41,6 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <malloc.h>
 
 #include "common_defs.h"
 #include "data_model.h"
@@ -173,6 +173,7 @@ int DATA_MODEL_Init(void)
     is_executing_within_dm_init = true;
     err = USP_ERR_OK;
     err |= DEVICE_LOCAL_AGENT_Init();
+    err |= DEVICE_TIME_Init();
     err |= DEVICE_CONTROLLER_Init();
     err |= DEVICE_MTP_Init();
     err |= DEVICE_STOMP_Init();
@@ -198,7 +199,11 @@ int DATA_MODEL_Init(void)
     }
 
     // Register vendor nodes in the schema
-    err |= VENDOR_Init();
+    err = VENDOR_Init();
+    if (err != USP_ERR_OK)
+    {
+        return err;
+    }
 
     // Exit if unable to potentially perform a programmatic factory reset of the parameters in the database
     // NOTE: This must be performed before DEVICE_LOCAL_AGENT_SetDefaults(), but after VENDOR_Init()
@@ -283,13 +288,18 @@ int DATA_MODEL_Start(void)
     // data model to be running to access database parameters (seeded from the database - above)
     err = USP_ERR_OK;
     err |= DEVICE_LOCAL_AGENT_Start();
+    err |= DEVICE_TIME_Start();
     err |= DEVICE_CONTROLLER_Start();
-    err |= DEVICE_MTP_Start();
-    err |= DEVICE_STOMP_Start();
-    err |= DEVICE_SUBSCRIPTION_Start();   // NOTE: This must come after DEVICE_LOCAL_AGENT_Start(), as it calls DEVICE_LOCAL_AGENT_GetRebootInfo()
     err |= DEVICE_SECURITY_Start();
+    err |= DEVICE_STOMP_Start();          // NOTE: This must come after DEVICE_SECURITY_Start(), as it assumes the trust store and client certs have been locally cached
+#ifdef ENABLE_COAP
+    err |= COAP_Start();                  // NOTE: This must come after DEVICE_SECURITY_Start(), as it assumes the trust store and client certs have been locally cached
+#endif
+    err |= DEVICE_MTP_Start();            // NOTE: This must come after COAP_Start, as it assumes that the CoAP SSL contexts have been created
+    err |= DEVICE_SUBSCRIPTION_Start();   // NOTE: This must come after DEVICE_LOCAL_AGENT_Start(), as it calls DEVICE_LOCAL_AGENT_GetRebootInfo()
     err |= DEVICE_CTRUST_Start();
     err |= DEVICE_BULKDATA_Start();
+
 
 
 
@@ -361,7 +371,7 @@ void DATA_MODEL_Stop(void)
 ** \param   path - pointer to string containing complete data model path to the parameter
 ** \param   buf - pointer to buffer into which to return the value of the parameter (as a textual string)
 ** \param   len - length of buffer in which to return the value of the parameter
-** \param   flags - options to control execution of this function (eg SHOW_PASSWORD, JSON_FORMAT)
+** \param   flags - options to control execution of this function (eg SHOW_PASSWORD)
 **
 ** \return  USP_ERR_OK if successful
 **
@@ -502,17 +512,6 @@ int DATA_MODEL_GetParameterValue(char *path, char *buf, int len, unsigned flags)
     // If code gets here, then value was retrieved successfully
     buf[len -1] = '\0';         // Ensure that buffer is always zero terminated (eg vendor may not do this)
 
-    // Convert the value in the buffer to JSON format, if required (and only if JSON format needs the string to change, based on the parameter's type)
-    if ( (flags & JSON_FORMAT) && (node->registered.param_info.type_flags & (DM_STRING | DM_DATETIME)) )
-    {
-        // Exit if failed to convert (this could happen if the buffer was not large enough to hold the converted value)
-        err = TEXT_UTILS_ToJSONFormat(buf, len);
-        if (err != USP_ERR_OK)
-        {
-            return err;
-        }
-    }
-
     return USP_ERR_OK;
 }
 
@@ -574,6 +573,32 @@ int DATA_MODEL_SetParameterValue(char *path, char *new_value, unsigned flags)
         }
     }
 
+    // Exit if the parameter is read only
+    switch(node->type)
+    {
+        case kDMNodeType_DBParam_ReadOnly:
+        case kDMNodeType_DBParam_ReadOnlyAuto:
+            if (flags & CHECK_WRITABLE)
+            {
+                // Read-only parameters may be written internally by USP Agent when seeding read only tables
+                // but writes initiated by a controller should not be allowed
+                USP_ERR_SetMessage("%s: Trying to perform a parameter set on read-only parameter %s", __FUNCTION__, path);
+                return USP_ERR_PARAM_READ_ONLY;
+            }
+            break;
+
+        case kDMNodeType_Param_ConstantValue:
+        case kDMNodeType_Param_NumEntries:
+        case kDMNodeType_VendorParam_ReadOnly:
+            USP_ERR_SetMessage("%s: Trying to perform a parameter set on read-only parameter %s", __FUNCTION__, path);
+            return USP_ERR_PARAM_READ_ONLY;
+            break;
+
+        default:
+            // Parameter is writable - nothing to do
+            break;
+    }
+
     // Exit if unable to convert the new value to its correct native type
     // NOTE: This also initialises the request structure, passed to the set vendor hook
     err = DM_PRIV_InitSetRequest(&req, node, path, &inst, new_value);
@@ -599,7 +624,6 @@ int DATA_MODEL_SetParameterValue(char *path, char *new_value, unsigned flags)
                 }
             }
             break;
-
 
         case kDMNodeType_DBParam_Secure:
             // Intentional fall through to code below
@@ -631,13 +655,6 @@ int DATA_MODEL_SetParameterValue(char *path, char *new_value, unsigned flags)
 
         case kDMNodeType_DBParam_ReadOnly:
         case kDMNodeType_DBParam_ReadOnlyAuto:
-            // Exit if this is a controller trying to write to a read only parameter
-            if (flags & CHECK_WRITABLE)
-            {
-                USP_ERR_SetMessage("%s: Trying to perform a parameter set on read-only parameter %s", __FUNCTION__, path);
-                return USP_ERR_PARAM_READ_ONLY;
-            }
-
             // Set the parameter to the new value in the database
             // Read-only parameters may be written internally by USP Agent when seeding read only tables
             // but writes initiated by a controller should never reach here
@@ -652,9 +669,8 @@ int DATA_MODEL_SetParameterValue(char *path, char *new_value, unsigned flags)
         case kDMNodeType_Param_ConstantValue:
         case kDMNodeType_Param_NumEntries:
         case kDMNodeType_VendorParam_ReadOnly:
-            // Exit if parameter cannot be written
-            USP_ERR_SetMessage("%s: Trying to perform a parameter set on read-only parameter %s", __FUNCTION__, path);
-            return USP_ERR_PARAM_READ_ONLY;
+            // The code should not have reached here, as these parameters are read only
+            USP_ASSERT(false);
             break;
 
         default:
@@ -1266,7 +1282,7 @@ int DATA_MODEL_Operate(char *path, kv_vector_t *input_args, kv_vector_t *output_
             err = KV_VECTOR_ValidateArguments(output_args, &info->output_args);
             if (err != USP_ERR_OK)
             {
-                USP_LOG_Warning("%s: Output arguments names do not match those registered. Please check code.", __FUNCTION__);
+                USP_LOG_Warning("%s: Output arguments names do not match those registered (%s). Please check code.", __FUNCTION__, path);
                 err = USP_ERR_OK;
             }
             #endif
@@ -2069,11 +2085,12 @@ int DATA_MODEL_GetInstances(char *path, int_vector_t *iv)
         return USP_ERR_NOT_A_TABLE;
     }
 
-    // Exit if this object is a fully qualified instance
+    // Exit if this object is already a fully qualified instance
+    // This can occur if the path given to the path resolver has an instance number immediately followed by '*' or '[]' (ie path syntax error)
     if (is_qualified_instance)
     {
-        USP_ERR_SetMessage("%s: Path (%s) should not contain instance number of object to get a vector containing instance numbers", __FUNCTION__, path);
-        return USP_ERR_INVALID_ARGUMENTS;
+        USP_ERR_SetMessage("%s: Path (%s) should not contain an instance number followed by '*' or '[]'", __FUNCTION__, path);
+        return USP_ERR_INVALID_PATH_SYNTAX;
     }
 
     // Exit if the object instances in the path do not exist
@@ -2220,6 +2237,54 @@ int DATA_MODEL_GetAllInstancePaths(char *path, str_vector_t *sv, combined_role_t
 
 /*********************************************************************//**
 **
+** DATA_MODEL_GetJSONParameterType
+**
+** Obtains the type of the specified parameter
+** The type is denoted by a letter code: 'S'=strings and datetime, 'N'=number, 'B'=boolean
+** NOTE: This function MUST only ever be called on parameter (not object) paths that have already been validated
+**
+** \param   path - full data model path of the parameter
+**
+** \return  type of the parameter as a character code
+**
+**************************************************************************/
+char DATA_MODEL_GetJSONParameterType(char *path)
+{
+    dm_instances_t inst;            // unused
+    bool is_qualified_instance;     // unused
+    dm_node_t *node;
+    unsigned type_flags;
+    char type;
+
+    node = DM_PRIV_GetNodeFromPath(path, &inst, &is_qualified_instance);
+    USP_ASSERT(node != NULL);  // because the path we queried was generated by the path resolver, so we expect it to exist
+    USP_ASSERT( ((node->type != kDMNodeType_Object_MultiInstance) &&
+                 (node->type != kDMNodeType_Object_SingleInstance) &&
+                 (node->type != kDMNodeType_SyncOperation) &&
+                 (node->type != kDMNodeType_AsyncOperation) &&
+                 (node->type != kDMNodeType_Event)) );
+
+    // Calculate the type of this parameter
+    type_flags = node->registered.param_info.type_flags;
+    if (type_flags & (DM_INT | DM_UINT | DM_ULONG))
+    {
+        type = 'N';
+    }
+    else if (type_flags & DM_BOOL)
+    {
+        type = 'B';
+    }
+    else
+    {
+        // Default, and also for DM_STRING and DM_DATETIME
+        type = 'S';
+    }
+
+    return type;
+}
+
+/*********************************************************************//**
+**
 ** DATA_MODEL_SetParameterInDatabase
 **
 ** Function to set a parameter directly in the database, ignoring all vendor hooks
@@ -2345,7 +2410,7 @@ int DM_PRIV_InitSetRequest(dm_req_t *req, dm_node_t *node, char *path, dm_instan
     else if (type_flags & DM_ULONG)
     {
         type_name = "ulong";
-        err = TEXT_UTILS_StringToUnsignedLong(new_value, &req->val_union.value_ulong);
+        err = TEXT_UTILS_StringToUnsignedLongLong(new_value, &req->val_union.value_ulong);
     }
 
     // Set a more useful error message containing the name of the parameter in error
@@ -2985,7 +3050,7 @@ void SerializeNativeValue(dm_req_t *req, dm_node_t *node, char *buf, int len)
     }
     else if (type_flags & DM_ULONG)
     {
-        USP_SNPRINTF(buf, len, "%lu", req->val_union.value_ulong);
+        USP_SNPRINTF(buf, len, "%llu", req->val_union.value_ulong);
     }
 }
 

@@ -1,6 +1,7 @@
 /*
  *
- * Copyright (C) 2016-2019  ARRIS Enterprises, LLC
+ * Copyright (C) 2019, Broadband Forum
+ * Copyright (C) 2016-2019  CommScope, Inc
  * 
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -83,7 +84,7 @@ static subs_retry_vector_t subs_retry;
 
 //------------------------------------------------------------------------
 // Time at which first message to be retried, is to be retried
-static time_t first_retry_time = (time_t) INT_MAX;
+static time_t first_retry_time = END_OF_TIME;
 
 //------------------------------------------------------------------------
 // Forward declarations. Note these are not static, because we need them in the symbol table for USP_LOG_Callstack() to show them
@@ -109,7 +110,7 @@ void SUBS_RETRY_Init(void)
 {
     subs_retry.num_entries = 0;
     subs_retry.vector = NULL;
-    SYNC_TIMER_Add(SubsRetryExec, 0, (time_t)INT_MAX);
+    SYNC_TIMER_Add(SubsRetryExec, 0, END_OF_TIME);
 }
 
 /*********************************************************************//**
@@ -328,6 +329,7 @@ void SubsRetryExec(int id)
     subs_retry_t *sr;
     time_t cur_time;
     char buf[MAX_ISO8601_LEN];
+    mtp_reply_to_t mtp_reply_to = {0};  // Ensures mtp_reply_to.is_reply_to_specified=false
     
     cur_time = time(NULL);
     USP_ASSERT(cur_time >= first_retry_time);
@@ -349,7 +351,7 @@ void SubsRetryExec(int id)
             if (cur_time >= sr->next_retry_time)
             {
                 // Try resending the saved serialized USP message
-                MSG_HANDLER_QueueUspRecord(USP__HEADER__MSG_TYPE__NOTIFY, sr->dest_endpoint, sr->pbuf, sr->pbuf_len, NULL, INVALID);
+                MSG_HANDLER_QueueUspRecord(USP__HEADER__MSG_TYPE__NOTIFY, sr->dest_endpoint, sr->pbuf, sr->pbuf_len, sr->msg_id, &mtp_reply_to, sr->retry_expiry_time);
 
                 // Calculate next time until this message is retried
                 sr->retry_count++;
@@ -457,7 +459,7 @@ void UpdateFirstRetryTime(void)
     time_t first;
 
     // Iterate over all retry entries, finding the first time that any of them fire
-    first = (time_t) INT_MAX;
+    first = END_OF_TIME;
     for (i=0; i < subs_retry.num_entries; i++)
     {
         sr = &subs_retry.vector[i];

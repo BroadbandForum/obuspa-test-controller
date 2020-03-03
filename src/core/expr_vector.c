@@ -1,6 +1,7 @@
 /*
  *
- * Copyright (C) 2016-2019  ARRIS Enterprises, LLC
+ * Copyright (C) 2019, Broadband Forum
+ * Copyright (C) 2016-2019  CommScope, Inc
  * 
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -358,7 +359,6 @@ int ParseExprComponent(char *buf, char **p_relative_path, expr_op_t *p_op, char 
     int len;
     
     // Split the buffer into 2 strings on the operator. Exiting if unable to find an operator.
-    len = strlen(buf);
     after_op = SplitOnOperator(buf, p_op);
     if (after_op == NULL)
     {
@@ -417,7 +417,7 @@ int ParseExprComponent(char *buf, char **p_relative_path, expr_op_t *p_op, char 
     }
 
     // Convert % escaped characters in the expression constant to their equivalent value
-    expr_const = TEXT_UTILS_UnescapeString(expr_const);
+    TEXT_UTILS_PercentDecodeString(expr_const);
 
     // If the code gets here, then the values were extracted successfully
     *p_relative_path = expr_param;

@@ -1,6 +1,7 @@
 /*
  *
- * Copyright (C) 2016-2019  ARRIS Enterprises, LLC
+ * Copyright (C) 2019, Broadband Forum
+ * Copyright (C) 2016-2019  CommScope, Inc
  * 
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -57,6 +58,7 @@
 #include "subs_retry.h"
 #include "text_utils.h"
 #include "expr_vector.h"
+#include "json.h"
 
 //------------------------------------------------------------------------------
 // List of notification types that USP Agent currently supports
@@ -149,7 +151,7 @@ void ProcessAllValueChangeSubscriptions(void);
 void ProcessValueChangeSubscription(subs_t *sub);
 void SendValueChangeNotify(subs_t *sub, char *path, char *value);
 void ResolveAllPathExpressions(char *source_path, str_vector_t *path_expressions, str_vector_t *resolved_paths, resolve_op_t op, int cont_instance);
-void GetAllPathExpressionParameterValues(subs_t *sub, str_vector_t *path_expressions, kv_vector_t *param_values, char *source_path, unsigned flags);
+void GetAllPathExpressionParameterValues(subs_t *sub, str_vector_t *path_expressions, kv_vector_t *param_values, char *source_path);
 char *SerializeToJSONObject(kv_vector_t *param_values);
 void SendOperationCompleteNotify(subs_t *sub, char *command, char *command_key, int err_code, char *err_msg, kv_vector_t *output_args);
 void SendNotify(Usp__Msg *req, subs_t *sub, char *path);
@@ -227,7 +229,7 @@ int DEVICE_SUBSCRIPTION_Init(void)
 
     // Create a timer which will be used to periodically poll for value change
     // NOTE: We create it here so that it is included in the base memory (before USP_MEM_StartCollection is called)
-    SYNC_TIMER_Add(DEVICE_SUBSCRIPTION_Update, 0, (time_t)INT_MAX);
+    SYNC_TIMER_Add(DEVICE_SUBSCRIPTION_Update, 0, END_OF_TIME);
 
     // If the code gets here, then registration was successful
     return USP_ERR_OK;
@@ -309,7 +311,7 @@ void DEVICE_SUBSCRIPTION_Stop(void)
 ** DEVICE_SUBSCRIPTION_Update
 **
 ** Periodically called to update all subscriptions
-** The first time this function is called, it regisyters a sync timer to periodically poll for value change
+** The first time this function is called, it registers a sync timer to periodically poll for value change
 **
 ** \param   id - (unused) identifier of the sync timer which caused this callback
 **
@@ -418,7 +420,7 @@ void DEVICE_SUBSCRIPTION_ProcessAllEventCompleteSubscriptions(char *event_name, 
         err = KV_VECTOR_ValidateArguments(output_args, &info->event_args);
         if (err != USP_ERR_OK)
         {
-            USP_LOG_Warning("%s: Output arguments names do not match those registered. Please check code.", __FUNCTION__);
+            USP_LOG_Warning("%s: Output argument names do not match those registered (%s). Please check code.", __FUNCTION__, event_name);
         }
     }
 #endif
@@ -746,7 +748,7 @@ exit:
         if ((sub.enable==true) && (sub.notify_type == kSubNotifyType_ValueChange))
         {
             USP_SNPRINTF(path, sizeof(path), "%s.%d", device_subs_root, sub.instance);
-            GetAllPathExpressionParameterValues(&sub, &sub.path_expressions, &sub.last_values, path, 0);
+            GetAllPathExpressionParameterValues(&sub, &sub.path_expressions, &sub.last_values, path);
         }
 
         // We have successfully retrieved a subscription, so add it to the vector
@@ -794,7 +796,7 @@ int CalcExpiryTime(int instance, time_t *expiry_time)
     // Exit if subscription does not ever expire
     if (time_to_live == 0)
     {
-        *expiry_time = (time_t)INT_MAX;
+        *expiry_time = END_OF_TIME;
         return USP_ERR_OK;
     }
 
@@ -891,7 +893,7 @@ int NotifyChange_SubsEnable(dm_req_t *req, char *value)
         if ((cur_enable == false) && (val_bool == true) && (sub->notify_type == kSubNotifyType_ValueChange))
         {
             USP_SNPRINTF(source_path, sizeof(source_path), "%s.%d", device_subs_root, sub->instance);
-            GetAllPathExpressionParameterValues(sub, &sub->path_expressions, &sub->last_values, source_path, 0);
+            GetAllPathExpressionParameterValues(sub, &sub->path_expressions, &sub->last_values, source_path);
         }
     }
 
@@ -934,7 +936,7 @@ int NotifyChange_NotifyType(dm_req_t *req, char *value)
                                   && (new_notify_type == kSubNotifyType_ValueChange))
         {
             USP_SNPRINTF(source_path, sizeof(source_path), "%s.%d", device_subs_root, sub->instance);
-            GetAllPathExpressionParameterValues(sub, &sub->path_expressions, &sub->last_values, source_path, 0);
+            GetAllPathExpressionParameterValues(sub, &sub->path_expressions, &sub->last_values, source_path);
         }
 
     }
@@ -1728,7 +1730,7 @@ void ProcessValueChangeSubscription(subs_t *sub)
 
     // Get the current values of all parameters associated with this subscription
     USP_SNPRINTF(source_path, sizeof(source_path), "%s.%d", device_subs_root, sub->instance);
-    GetAllPathExpressionParameterValues(sub, &sub->path_expressions, &cur_values, source_path, 0);
+    GetAllPathExpressionParameterValues(sub, &sub->path_expressions, &cur_values, source_path);
     
     // Determine whether any of the values have changed from last time
     hint_index = 0;
@@ -1774,12 +1776,11 @@ void ProcessValueChangeSubscription(subs_t *sub)
 ** \param   param_values - vector in which parameter values are returned (key=parameter name, value=parameter value)
 **                         NOTE: This function overwrites any contents in this vector
 ** \param   source_path - string naming the table entry that the path expression came from. Used only for debug.
-** \param   flags - flags to pass to the DATA_MODEL_GetParameterValue() function (eg JSON_FORMAT)
 **
 ** \return  None
 **
 **************************************************************************/
-void GetAllPathExpressionParameterValues(subs_t *sub, str_vector_t *path_expressions, kv_vector_t *param_values, char *source_path, unsigned flags)
+void GetAllPathExpressionParameterValues(subs_t *sub, str_vector_t *path_expressions, kv_vector_t *param_values, char *source_path)
 {
     int i;
     int err;
@@ -1802,7 +1803,7 @@ void GetAllPathExpressionParameterValues(subs_t *sub, str_vector_t *path_express
 
         // Get the value of the parameter.
         buf[0] = '\0';
-        err = DATA_MODEL_GetParameterValue(pair->key, buf, sizeof(buf), flags);
+        err = DATA_MODEL_GetParameterValue(pair->key, buf, sizeof(buf), 0);
         if (err == USP_ERR_OK)
         {
             pair->value = USP_STRDUP(buf);
@@ -1917,12 +1918,12 @@ void SendBootNotify(subs_t *sub)
     // Add the cause (and associated command_key) of the last reboot
     KV_VECTOR_Init(&event_params);
     DEVICE_LOCAL_AGENT_GetRebootInfo(&info);
-    KV_VECTOR_Add(&event_params, "CommandKey", info.command_key);
-    KV_VECTOR_Add(&event_params, "Cause", info.cause);
+    USP_ARG_Add(&event_params, "CommandKey", info.command_key);
+    USP_ARG_Add(&event_params, "Cause", info.cause);
 
     // Set the Firmware updated output argument
     firmware_updated = (info.is_firmware_updated) ? "true" : "false";
-    KV_VECTOR_Add(&event_params, "FirmwareUpdated", firmware_updated);
+    USP_ARG_Add(&event_params, "FirmwareUpdated", firmware_updated);
 
     // Exit if unable to get the name of the controller table entry. This might be empty if the controller was deleted.
     USP_SNPRINTF(path, sizeof(path), "%s.%d.Recipient", device_subs_root, sub->instance);
@@ -1949,7 +1950,7 @@ void SendBootNotify(subs_t *sub)
         // Skip this parameter if not enabled
         USP_SNPRINTF(path, sizeof(path), "%s.BootParameter.%d.Enable", controller, instance);
         err = DM_ACCESS_GetBool(path, &enable);
-        if (enable == false)
+        if ((err != USP_ERR_OK) || (enable == false))
         {
             continue;
         }
@@ -1969,16 +1970,16 @@ void SendBootNotify(subs_t *sub)
 
     // Get the values of all parameters specified by the list of path expressions into the param_values vector
     USP_SNPRINTF(path, sizeof(path), "%s.%d", device_subs_root, sub->instance);
-    GetAllPathExpressionParameterValues(sub, &path_expr, &param_values, path, JSON_FORMAT);
+    GetAllPathExpressionParameterValues(sub, &path_expr, &param_values, path);
     STR_VECTOR_Destroy(&path_expr);
 
     // Create a JSON object containing the boot params (and associated values)
     json_object = SerializeToJSONObject(&param_values);
 
     // Add the JSON Object as the value of the 'ParameterMap' argument
-    KV_VECTOR_Add(&event_params, "ParameterMap", json_object);
+    USP_ARG_Add(&event_params, "ParameterMap", json_object);
     KV_VECTOR_Destroy(&param_values);
-    USP_FREE(json_object);
+    free(json_object);
 
     // Form the Boot notify event message as a protobuf structure
     req = MSG_HANDLER_CreateNotifyReq_Event((char *)device_boot_event, &event_params, sub->subscription_id, sub->notification_retry);
@@ -2004,42 +2005,52 @@ void SendBootNotify(subs_t *sub)
 **************************************************************************/
 char *SerializeToJSONObject(kv_vector_t *param_values)
 {
-    kv_pair_t *kv;
-    int size;
-    char *buf;
-    char *p;
+    JsonNode *top;          // top of report
+    double value_as_number;
+    bool value_as_bool;
     int i;
+    kv_pair_t *kv;
+    int err;
+    char *buf;
+    char param_type;
 
-    // Calculate the size of buffer to allocate to store the JSON object
-    size = 3;       // Start from JSON Object including opening and closing braces and NULL terminator
+    top = json_mkobject();
+
+    // Iterate over each parameter, adding it to the json object. Take account of the parameter's type
     for (i=0; i < param_values->num_entries; i++)
     {
         kv = &param_values->vector[i];
-        size += strlen(kv->key) + strlen(kv->value) + 4; // Plus 4 to include quoting the param path, adding colon separator and traling comma
-    }
-
-    // Allocate a buffer to store the JSON object
-    buf = USP_MALLOC(size);
-
-    // Write all parameters and values into the JSON buffer
-    p = buf;
-    *p++ = '{';
-    for (i=0; i < param_values->num_entries; i++)
-    {
-        // Add trailing separator from last iteration
-        if (i > 0)
+        param_type = DATA_MODEL_GetJSONParameterType(kv->key);
+        switch (param_type)
         {
-            *p++ = ',';
-        }
+            case 'S':
+                json_append_member(top, kv->key, json_mkstring(kv->value) );
+                break;
 
-        // Write parameter and value into buffer
-        kv = &param_values->vector[i];
-        p += USP_SNPRINTF(p, &buf[size]-p, "\"%s\":%s", kv->key, kv->value);
+            case 'N':
+                value_as_number = atof(kv->value);
+                json_append_member(top, kv->key, json_mknumber(value_as_number) );
+                break;
+
+            case 'B':
+                err = TEXT_UTILS_StringToBool(kv->value, &value_as_bool);
+                if (err == USP_ERR_OK)
+                {
+                    json_append_member(top, kv->key, json_mkbool(value_as_bool) );
+                }
+                break;
+
+            default:
+                USP_ASSERT(false);
+                break;
+        }
     }
 
-    // Finish the JSON object
-    *p++ = '}';
-    *p++ = '\0';
+    // Serialize the JSON tree
+    buf = json_stringify(top, NULL);
+
+    // Clean up the JSON tree
+    json_delete(top);        // Other JsonNodes which are children of this top level tree will be deleted 
 
     return buf;
 }
@@ -2103,6 +2114,7 @@ void SendNotify(Usp__Msg *req, subs_t *sub, char *path)
     time_t retry_expiry_time;
     char *msg_id;
     char *dest_endpoint;
+    mtp_reply_to_t mtp_reply_to = {0};  // Ensures mtp_reply_to.is_reply_to_specified=false
 
     // Exit if unable to determine the endpoint of the controller
     // This could occur if the controller had been deleted
@@ -2120,25 +2132,22 @@ void SendNotify(Usp__Msg *req, subs_t *sub, char *path)
 
     USP_LOG_Info("Sending NotifyRequest (%s for path=%s)", TEXT_UTILS_EnumToString(sub->notify_type, notify_types, NUM_ELEM(notify_types)), path);
 
+    // Determine the time at which we should give up retrying, or expire the message in the MTP's send queue
+    retry_expiry_time = END_OF_TIME;       // default to never expire
+    if ((sub->notification_retry) && (sub->retry_expiry_period != 0))
+    {
+        cur_time = time(NULL);
+        retry_expiry_time = cur_time + sub->retry_expiry_period;
+    }
+
     // Send the message
     // NOTE: Intentionally ignoring error here. If the controller has been disabled or deleted, then
     // allow the subs retry code to remove any previous attempts from the retry array
-    MSG_HANDLER_QueueUspRecord(USP__HEADER__MSG_TYPE__NOTIFY, dest_endpoint, pbuf, pbuf_len, NULL, INVALID);
+    MSG_HANDLER_QueueUspRecord(USP__HEADER__MSG_TYPE__NOTIFY, dest_endpoint, pbuf, pbuf_len, req->header->msg_id, &mtp_reply_to, retry_expiry_time);
 
     // If the message should be retried until a NotifyResponse is received, then...
     if (sub->notification_retry)
     {
-        // Determine the time at which we should give up retrying
-        if (sub->retry_expiry_period == 0)
-        {
-            retry_expiry_time = (time_t) INT_MAX;
-        }
-        else
-        {
-            cur_time = time(NULL);
-            retry_expiry_time = cur_time + sub->retry_expiry_period;
-        }
-
         // Add this message to the list of notification requests to retry
         // NOTE: Ownership of the serialized USP message passes to the subs retry module
         msg_id = req->header->msg_id;

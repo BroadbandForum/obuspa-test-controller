@@ -1,6 +1,7 @@
 /*
  *
- * Copyright (C) 2016-2019  ARRIS Enterprises, LLC
+ * Copyright (C) 2019, Broadband Forum
+ * Copyright (C) 2016-2019  CommScope, Inc
  * 
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -93,7 +94,7 @@ void SYNC_TIMER_Init(void)
 {
     sync_timers.vector = NULL;
     sync_timers.num_entries = 0;
-    first_sync_timer_time = (time_t) INT_MAX;
+    first_sync_timer_time = END_OF_TIME;
 }
 
 /*********************************************************************//**
@@ -148,7 +149,6 @@ int SYNC_TIMER_Add(timer_cb_t timer_cb, int id, time_t callback_time)
     }
 
     // Add this timer to the vector
-    st = &sync_timers.vector[index];
     new_num_entries = sync_timers.num_entries + 1;
     sync_timers.vector = USP_REALLOC(sync_timers.vector, new_num_entries*sizeof(sync_timer_t));
     st = &sync_timers.vector[ sync_timers.num_entries ];
@@ -392,7 +392,7 @@ void UpdateFirstSyncTimerTime(void)
     time_t first;
     
     // Iterate over all timers
-    first = (time_t) INT_MAX;
+    first = END_OF_TIME;
     for (i=0; i < sync_timers.num_entries; i++)
     {
         // Skip this timer if it is not enabled

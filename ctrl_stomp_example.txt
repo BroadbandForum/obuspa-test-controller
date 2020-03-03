@@ -1,0 +1,9 @@
+msg_id:"101" to_id:"proto::Agent1" stomp_agent_dest:"/queue/Agent1" stomp_instance:"1"
+msg_type:"GetSupportedDM" obj_paths:"Device." first_level_only:"false" return_commands:"true" return_events:"true" return_params:"true"
+msg_type:"GetSupportedProtocol" controller_supported_protocol_versions:"1.0"
+msg_type:GetInstances obj_paths:"Device.LocalAgent.MTP." first_level_only:"false"
+msg_type:"Get" param_paths:"Device.LocalAgent.MTP.*." param_paths:"Device.LocalAgent.Controller.*." param_paths:"Device.LocalAgent." param_paths:"Device.LocalAgent.MTP.1." param_paths:"Device.LocalAgent.MTP.*."
+msg_type:Add create_objs{obj_path:"Device.LocalAgent.Subscription." {param:"Enable" value:"false"} {param:"ID" value:"test123"} {param:"NotifType" value:"ObjectCreation"} {param:"ReferenceList" value:"Device.LocalAgent.Controller."}}   create_objs{obj_path:"Device.LocalAgent.Subscription." {param:"Enable" value:"false" required:"true"} {param:"ID" value:"test456"} {param:"NotifType" value:"Event"} {param:"ReferenceList" value:"Device.Boot!"}}
+msg_type:"Set" allow_partial:"true" update_objs{obj_path:"Device.DeviceInfo." {param:"FriendlyName" value:"MyDevicesFriendlyName" required:"true"}} update_objs{obj_path:"Device.LocalAgent.Subscription.[ID==\"test123\"]" {param:"Enable" value:"true"}}
+msg_type:"Operate" command:"Device.Reboot()" command_key:"boot123" send_resp:"true"
+msg_type:Delete obj_paths:"Device.LocalAgent.Subscription.[ID==\"test123\"]."

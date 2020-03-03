@@ -1,20 +1,22 @@
-AM_CPPFLAGS = -Isrc/core \
-              -Isrc/protobuf-c \
-              -Isrc/vendor \
-              -Isrc/libjson/ccan/json \
-              -Isrc/include
+AM_CPPFLAGS = -I$(top_srcdir)/src \
+              -I$(top_srcdir)/src/core \
+              -I$(top_srcdir)/src/protobuf-c \
+              -I$(top_srcdir)/src/vendor \
+              -I$(top_srcdir)/src/libjson/ccan/json \
+              -I$(top_srcdir)/src/include
 
 # Enable warnings, treat warnings as errors, and stop compilation at
-# first error.  Define _GNU_SOURCE to pickup GNU version of strerror_r() and dladdr()
+# first error.
 # Sub-makes are free to supplement AM_CFLAGS, e.g.
 #         AM_CFLAGS += -Wno-error
 # as necessary.
-AM_CFLAGS = -Wall -Wfatal-errors -D _GNU_SOURCE
+AM_CFLAGS = -Wall -Wfatal-errors
 
-bin_PROGRAMS = ob_uspagent
+bin_PROGRAMS = obuspa
 
+OBUSPA_LOCAL_STATE_DIR = "$(localstatedir)/obuspa/"
 
-ob_uspagent_SOURCES = src/core/main.c \
+obuspa_SOURCES = src/core/main.c \
                     src/core/mtp_exec.c \
                     src/core/dm_exec.c \
                     src/core/bdc_exec.c \
@@ -46,6 +48,7 @@ ob_uspagent_SOURCES = src/core/main.c \
                     src/core/device_ctrust.c \
                     src/core/device_bulkdata.c \
                     src/core/device_selftest_example.c \
+                    src/core/device_time.c \
                     src/core/uptime.c \
                     src/core/rfc1123.c \
                     src/core/database.c \
@@ -76,12 +79,15 @@ ob_uspagent_SOURCES = src/core/main.c \
                     src/protobuf-c/usp-msg.pb-c.c \
                     src/protobuf-c/usp-record.pb-c.c \
                     src/protobuf-c/protobuf-c.c \
-					src/core/usp_coap.c \
+                    src/core/coap_common.c \
+                    src/core/coap_client.c \
+                    src/core/coap_server.c \
                     src/core/uri.c
 
-ob_uspagent_CPPFLAGS = $(openssl_CFLAGS) $(sqlite3_CFLAGS) $(libcurl_CFLAGS) $(libcares_CFLAGS) $(zlib_CFLAGS)
-ob_uspagent_CPPFLAGS += -DENABLE_COAP
-ob_uspagent_CPPFLAGS +=  $(AM_CPPFLAGS) \
+obuspa_CPPFLAGS = $(openssl_CFLAGS) $(sqlite3_CFLAGS) $(libcurl_CFLAGS) $(zlib_CFLAGS)
+obuspa_CPPFLAGS += -DENABLE_COAP
+obuspa_CPPFLAGS += -DOBUSPA_LOCAL_STATE_DIR=\"$(OBUSPA_LOCAL_STATE_DIR)\"
+obuspa_CPPFLAGS +=  $(AM_CPPFLAGS) \
                       -Werror \
                       -Werror=unused-value \
                       -Werror=format \
@@ -91,17 +97,24 @@ ob_uspagent_CPPFLAGS +=  $(AM_CPPFLAGS) \
 # NOTE: In order for GCC to check for uninitialised variables, you need to turn optimisation on i.e. "-O2"
 
 # Turn on rdynamic linker flags so that backtrace_symbols() call works
-ob_uspagent_LDFLAGS = -rdynamic
+obuspa_LDFLAGS = -rdynamic
 
-ob_uspagent_LDADD = -lm -ldl -lpthread -lrt
-ob_uspagent_LDADD += $(openssl_LIBS) $(sqlite3_LIBS) $(libcurl_LIBS) $(libcares_LIBS) $(zlib_LIBS)
+obuspa_LDADD = -lm -ldl -lpthread -lrt
+obuspa_LDADD += $(openssl_LIBS) $(sqlite3_LIBS) $(libcurl_LIBS) $(zlib_LIBS)
 
-# Unfortunately libcoap cannot use the autotools magic environment variables, so add support manually
-ob_uspagent_LDADD += -lcoap-1
-ob_uspagent_LDFLAGS += -Wl,-rpath=/usr/local/lib
+obuspa_LDFLAGS += -Wl,-rpath=/usr/local/lib
+
+# Create obuspa directory for usp.db etc on install
+# This depends on your prefix setting (default localstatedir=/usr/local/var/)
+# Default OBUSPA_LOCAL_STATE_DIR=/usr/local/var/obuspa/
+install-data-local:
+	${mkdir_p} "${DESTDIR}/${OBUSPA_LOCAL_STATE_DIR}"
+	if [ -n "${SUDO_USER}" ]; then \
+		chown -R "${SUDO_USER}" "${DESTDIR}/${OBUSPA_LOCAL_STATE_DIR}"; \
+	fi
+
+uninstall-local:
+	rm -rf "${DESTDIR}/${OBUSPA_LOCAL_STATE_DIR}"
 
 # Import vendor makefile
 include src/vendor/vendor.am
-
-
-# vim:ts=8:sw=8:noet

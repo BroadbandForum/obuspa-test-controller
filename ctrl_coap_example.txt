@@ -1,0 +1,8 @@
+msg_id:"1" to_id:"proto::Agent1" coap_host:"192.168.1.119" coap_port:"5683" coap_resource:"Agent1"
+msg_type:"GetSupportedProtocol" controller_supported_protocol_versions:"1.0"
+msg_type:GetInstances obj_paths:"Device.LocalAgent.MTP." first_level_only:"false"
+msg_type:"Get" param_paths:"Device.LocalAgent.MTP.*." param_paths:"Device.LocalAgent.Controller.*." param_paths:"Device.LocalAgent." param_paths:"Device.LocalAgent.MTP.1." param_paths:"Device.LocalAgent.MTP.*."
+msg_type:Add create_objs{obj_path:"Device.LocalAgent.Subscription." allow_partial:"true" {param:"Enable" value:"false"} {param:"ID" value:"test123"} {param:"NotifType" value:"ObjectCreation"} {param:"ReferenceList" value:"Device.LocalAgent.Controller."}}   create_objs{obj_path:"Device.LocalAgent.Subscription." {param:"Enable" value:"false" required:"true"} {param:"ID" value:"test456" required:"true"} {param:"NotifType" value:"Event"} {param:"ReferenceList" value:"Device.Boot!"}}
+msg_type:"Set" allow_partial:"true" update_objs{obj_path:"Device.DeviceInfo." {param:"FriendlyName" value:"MyDevicesFriendlyName" required:"true"}} update_objs{obj_path:"Device.LocalAgent.Subscription.[ID==\"test123\"]" {param:"Enable" value:"true"}}
+msg_type:Delete obj_paths:"Device.LocalAgent.Subscription.[ID==\"test123\"]."
+msg_type:Delete obj_paths:"Device.LocalAgent.Subscription.[ID==\"test456\"]."

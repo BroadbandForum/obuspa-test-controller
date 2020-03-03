@@ -1,6 +1,7 @@
 # Source files in vendor
-ob_uspagent_SOURCES += src/vendor/vendor.c \
-                       src/vendor/vendor_factory_reset_example.c
+obuspa_SOURCES += src/vendor/vendor.c \
+                  src/vendor/vendor_factory_reset_example.c \
+                  src/vendor/ctrl_file_parser.c
 
 # Add extra vendor specific CPP or LD flags below
 

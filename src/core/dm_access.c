@@ -1,6 +1,7 @@
 /*
  *
- * Copyright (C) 2016-2019  ARRIS Enterprises, LLC
+ * Copyright (C) 2019, Broadband Forum
+ * Copyright (C) 2016-2019  CommScope, Inc
  * 
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -41,7 +42,6 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <malloc.h>
 
 #include "common_defs.h"
 #include "data_model.h"
@@ -988,7 +988,7 @@ int DM_ACCESS_PopulateAliasParam(dm_req_t *req, char *buf, int len)
 
     // Generate the value to auto-populate the Alias parameter with
     instance = req->inst->instances[req->inst->order-1];
-    USP_SNPRINTF(buf, len, "cpe-%d", instance);
+    USP_SNPRINTF(buf, len, DEFAULT_ALIAS_PREFIX "%d", instance);
 
     return USP_ERR_OK;
 }
