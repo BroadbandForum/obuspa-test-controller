@@ -1,7 +1,7 @@
 /*
  *
- * Copyright (C) 2019, Broadband Forum
- * Copyright (C) 2016-2019  CommScope, Inc
+ * Copyright (C) 2019-2020, Broadband Forum
+ * Copyright (C) 2016-2020  CommScope, Inc
  * 
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -175,7 +175,7 @@ typedef enum
 
 //------------------------------------------------------------------------------
 // Controller Function API
-int CTRL_FILE_PARSER_Start(char *controller_file);
+int CTRL_FILE_PARSER_Start(char *controller_file, char *db_file);
 
 
 

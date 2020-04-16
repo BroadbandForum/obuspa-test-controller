@@ -13,5 +13,6 @@ Thank you for your interest in contributing! Please refer to CONTRIBUTING.md for
 
 ## Wiki Access
 
-Please also see our WIKI for more details about the project.
+The OB-USP-Agent test controller is part of Broadband Forum's OB-USP-Agent project. Please see the [OB-USP-Agent Wiki](https://github.com/BroadbandForum/obuspa/wiki) for more details about the OB-USP-Agent project.
+
 

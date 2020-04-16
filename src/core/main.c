@@ -1,7 +1,7 @@
 /*
  *
- * Copyright (C) 2019, Broadband Forum
- * Copyright (C) 2016-2019  CommScope, Inc
+ * Copyright (C) 2019-2020, Broadband Forum
+ * Copyright (C) 2016-2020  CommScope, Inc
  * 
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -131,6 +131,7 @@ int main(int argc, char *argv[])
     int option_index = 0;
     char *db_file = DEFAULT_DATABASE_FILE;
     bool enable_mem_info = false;
+    char *test_controller_file = NULL;
 
     // Determine a handle for the data model thread (this thread)
     OS_UTILS_SetDataModelThread();
@@ -237,14 +238,7 @@ int main(int argc, char *argv[])
                 break;
 
             case 'x':
-                // Input is file with controller messages; calls method to start controller function
-                err = CTRL_FILE_PARSER_Start(optarg);
-                if (err != USP_ERR_OK)
-                {
-                    goto exit;
-                }
-                return err;
-                exit(0);
+                test_controller_file = optarg;
                 break;
 
             default:
@@ -258,6 +252,17 @@ int main(int argc, char *argv[])
                 goto exit;
                 break;
         }
+    }
+
+    // Run this executable as a test controller, if specified
+    if (test_controller_file != NULL)
+    {
+        err = CTRL_FILE_PARSER_Start(test_controller_file, db_file);
+        if (err != USP_ERR_OK)
+        {
+            goto exit;
+        }
+        return err;
     }
 
     // Print a warning for any remaining command line arguments

@@ -25,5 +25,5 @@ For build instructions, please refer to [QUICK_START_GUIDE](https://github.com/B
 
 ## Contributor License Agreement
 
-Any company or individual interested in participating in this open source project must sign a Contributor License Agreement (more details [here](https://github.com/BroadbandForum/obuspa/wiki/Contributor-License-Agreement-Details)).
+Any company or individual interested in participating in the OB-USP-Agent open source project (which includes both the OB-USP-Agent and the OB-USP-Agent test controller) must sign a Contributor License Agreement (more details [here](https://github.com/BroadbandForum/obuspa/wiki/Contributor-License-Agreement-Details)).
 

@@ -1,6 +1,7 @@
 /*
  *
- * Copyright (C) 2019, Broadband Forum
+ * Copyright (C) 2019-2020, Broadband Forum
+ * Copyright (C) 2020  CommScope, Inc
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -81,7 +82,7 @@ Usp__Msg *CreateAdd(bool allow_partial, char obj_paths[MAX_PATHS][VALUE_SIZE], b
 Usp__Msg *CreateSet(bool allow_partial, char obj_paths[MAX_PATHS][VALUE_SIZE], bool req[MAX_PATHS][MAX_PARAMVALUE], int n_p_settings[MAX_PATHS], char p_settings_param[MAX_PATHS][MAX_PARAMVALUE][PARAM_SIZE], char p_settings_value[MAX_PATHS][MAX_PARAMVALUE][VALUE_SIZE], int n);
 Usp__Msg *CreateOperate(char command[VALUE_SIZE], char command_key[VALUE_SIZE], char keys[MAX_PARAMVALUE][PARAM_SIZE], char values[MAX_PARAMVALUE][VALUE_SIZE], bool send_resp, int n);
 int Controller_Start(char *db_file, bool enable_mem_info);
-int StartBasicAgentProcesses(void);
+int StartBasicAgentProcesses(char *db_file);
 mtp_reply_to_t *InitializeMTPStructure(void);
 
 // parameters collected from first line and used globally
@@ -1635,13 +1636,14 @@ mtp_reply_to_t *InitializeMTPStructure(void)
 **
 ** Starts Agent processes so they can be used to send messages
 **
+** \param   db_file - file containing the database
+**
 ** \return  USP error message
 **
 **************************************************************************/
-int StartBasicAgentProcesses(void)
+int StartBasicAgentProcesses(char *db_file)
 {
     int err;
-    char *db_file = DEFAULT_DATABASE_FILE;
     bool enable_mem_info = false;
 
     // Sleep until other services which USP Agent processes use (eg DNS) are running
@@ -1786,18 +1788,20 @@ int Controller_Start(char *db_file, bool enable_mem_info)
 **
 ** Called from main.c when -x (controller mode) option is in command line
 **
-** \param  controller_file that contains lines of Controller messages to send
+** \param   controller_file that contains lines of Controller messages to send
+** \param   db_file - file containing the database
+**
 ** \return  USP error message
 **
 **************************************************************************/
-int CTRL_FILE_PARSER_Start(char *controller_file)
+int CTRL_FILE_PARSER_Start(char *controller_file, char *db_file)
 {
     int i = 0;
     int err;
     char line[LINE_SIZE];
     FILE *fp;
 
-    err = StartBasicAgentProcesses();
+    err = StartBasicAgentProcesses(db_file);
     fp = fopen(controller_file,"r"); // open the file
     if( fp == NULL ) // make sure the file actually exists
     {
