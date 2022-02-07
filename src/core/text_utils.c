@@ -1,33 +1,33 @@
 /*
  *
- * Copyright (C) 2019, Broadband Forum
- * Copyright (C) 2016-2019  CommScope, Inc
- * 
+ * Copyright (C) 2019-2021, Broadband Forum
+ * Copyright (C) 2016-2021  CommScope, Inc
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
- * 
+ *
  * 1. Redistributions of source code must retain the above copyright
  *    notice, this list of conditions and the following disclaimer.
- * 
+ *
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 
+ *
  * 3. Neither the name of the copyright holder nor the names of its
  *    contributors may be used to endorse or promote products derived from
  *    this software without specific prior written permission.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
  * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR 
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF 
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
  * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
  * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF 
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
  * THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
@@ -41,6 +41,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <openssl/evp.h>
 
 #include "common_defs.h"
 #include "str_vector.h"
@@ -63,20 +64,17 @@
 ** \return  hash value
 **
 **************************************************************************/
-int TEXT_UTILS_CalcHash(char *s)
+dm_hash_t TEXT_UTILS_CalcHash(char *s)
 {
-    #define OFFSET_BASIS (0x811C9DC5)
-    #define FNV_PRIME (0x1000193)
-    unsigned hash = OFFSET_BASIS;
+    dm_hash_t hash = OFFSET_BASIS;
 
     while (*s != '\0')
     {
-        hash = hash * FNV_PRIME;
-        hash = hash ^ (*s);
+        ADD_TO_HASH(*s, hash);
         s++;
     }
 
-    return (int)hash;
+    return hash;
 }
 
 /*********************************************************************//**
@@ -132,7 +130,7 @@ int TEXT_UTILS_StringToUnsigned(char *str, unsigned *value)
 int TEXT_UTILS_StringToInteger(char *str, int *value)
 {
     int num_converted;
-    
+
     num_converted = sscanf(str, "%d", value);
     if (num_converted != 1)
     {
@@ -396,6 +394,62 @@ int TEXT_UTILS_StringToBinary(char *str, unsigned char *buf, int len, int *bytes
 
 /*********************************************************************//**
 **
+** TEXT_UTILS_Base64StringToBinary
+**
+** Converts a Base64 encoded string into its binary format in a buffer
+** NOTE: Copes with embedded CR/LF and space/tabs
+**
+** \param   str - pointer to input string to convert (in base64 format)
+** \param   buf - pointer to buffer in which to write the binary data
+** \param   len - length of the buffer
+** \param   bytes_written - pointer to variable in which to return the number of bytes written into the buffer, or NULL if not required
+**
+** \return  USP_ERR_OK if successful.
+**          USP_ERR_INVALID_TYPE if unable to convert the string
+**
+**************************************************************************/
+int TEXT_UTILS_Base64StringToBinary(char *str, unsigned char *buf, int len, int *bytes_written)
+{
+    int err;
+    int original_len;
+    char *stripped = NULL;
+    int stripped_len;
+    int output_len;
+
+    // Strip the input string of CR/LF and tab/space.
+    // This is necessary because the OpenSSL conversion function does not cope with these characters correctly
+    // NOTE: This may be fixed in later versions of OpenSSL (after 1.1.1c) as the documentation now suggests this stage is not required
+    original_len = strlen(str) + 1;   // Plus 1 to include NULL terminator
+    stripped = USP_MALLOC(original_len);
+    TEXT_UTILS_StripChars("\n\r\t ", str, stripped, original_len);
+
+    stripped_len = strlen(stripped);
+    USP_ASSERT(len > (stripped_len*3)/4 );  // Ensure that output buffer won't overflow
+
+    // Exit if failed to decode the stripped input
+    output_len = EVP_DecodeBlock(buf, (const unsigned char *)stripped, stripped_len);
+    if (output_len == -1)
+    {
+        USP_ERR_SetMessage("%s: Unable to convert base64 encoded string", __FUNCTION__);
+        err = USP_ERR_INVALID_TYPE;
+        goto exit;
+    }
+
+    // Return the number of bytes converted (if required)
+    if (bytes_written != NULL)
+    {
+        *bytes_written = output_len;
+    }
+
+    err = USP_ERR_OK;
+
+exit:
+    USP_SAFE_FREE(stripped);
+    return err;
+}
+
+/*********************************************************************//**
+**
 ** TEXT_UTILS_StringToIpAddr
 **
 ** Converts a string to an IP address (IPv4 or IPv6)
@@ -427,6 +481,46 @@ int TEXT_UTILS_StringToIpAddr(char *str, nu_ipaddr_t *ip_addr)
     }
 
     return USP_ERR_OK;
+}
+
+/*********************************************************************//**
+**
+** TEXT_UTILS_ListToString
+**
+** Forms a comma separated string from a array of items
+**
+** \param   items - array of items to put in the destination string
+** \param   num_items - number of items in the array
+** \param   buf - pointer to buffer in which to return the string
+** \param   len - length of buffer in which to return the string
+**
+** \return  None
+**
+**************************************************************************/
+void TEXT_UTILS_ListToString(char **items, int num_items, char *buf, int len)
+{
+    int i;
+    int chars_written;
+
+    // Default to empty string, if no items
+    *buf = '\0';
+
+    // Iterate over all items to add
+    for (i=0; i<num_items; i++)
+    {
+        // Add comma before every item (apart from the first)
+        if (i != 0)
+        {
+            chars_written = USP_SNPRINTF(buf, len, "%s", ", ");
+            buf += chars_written;
+            len -= chars_written;
+        }
+
+        // Add the item
+        chars_written = USP_SNPRINTF(buf, len, "%s", items[i]);
+        buf += chars_written;
+        len -= chars_written;
+    }
 }
 
 /*********************************************************************//**
@@ -567,7 +661,7 @@ char *TEXT_UTILS_StrStr(char *haystack, char *needle)
                 return haystack;
             }
         }
-        
+
         // Move to next character
         haystack++;
         c = *haystack;
@@ -696,11 +790,11 @@ int TEXT_UTILS_KeyValueFromString(char *buf, char **key, char **value)
     char *p;
     int len;
     int key_len;
-    
+
     // Set default return parameters
     *key = NULL;
     *value = NULL;
-    
+
     // Exit if this line is a comment - nothing more to do
     if (buf[0] == '#')
     {
@@ -713,14 +807,14 @@ int TEXT_UTILS_KeyValueFromString(char *buf, char **key, char **value)
     {
         *p = '\0';
     }
-    
+
     // Truncate string at carriage return
     p = strchr(buf, '\r');
     if (p != NULL)
     {
         *p = '\0';
     }
-    
+
     // Skip leading whitespace
     #define WHITESPACE_CHARS " \t"
     len = strspn(buf, WHITESPACE_CHARS);
@@ -804,7 +898,7 @@ int TEXT_UTILS_NullStringCompare(char *str1, char *str2)
             return -1;
         }
     }
-    
+
     // Since both strings are non-NULL, compare them with the standard strcmp function
     return strcmp(str1, str2);
 }
@@ -813,7 +907,7 @@ int TEXT_UTILS_NullStringCompare(char *str1, char *str2)
 **
 ** TEXT_UTILS_TrimBuffer
 **
-** Trims the string in a buffer of leading and trailing whitespace by 
+** Trims the string in a buffer of leading and trailing whitespace by
 ** truncating the string in the buffer and returning a new pointer to the start of the string in the buffer
 **
 ** \param   buf - pointer to buffer containing string to trim
@@ -862,57 +956,103 @@ char *TEXT_UTILS_TrimBuffer(char *buf)
 
 /*********************************************************************//**
 **
+** TEXT_UTILS_StripChars
+**
+** Forms the destination string by removing the specified characters from the input string
+** NOTE: Caller must ensure that destination buffer is large enough. If not, converted string is truncated.
+**
+** \param   strip_chars - string containing characters to remove from the src string
+** \param   src - pointer to string to convert
+** \param   dest - pointer to buffer in which to return the stripped string
+** \param   dest_len - length of buffer in which to return the stripped string
+**
+** \return  pointer to string in buffer
+**
+**************************************************************************/
+void TEXT_UTILS_StripChars(char *strip_chars, char *src, char *dest, int dest_len)
+{
+    char c;
+
+    // Iterate over all characters in the src string
+    c = *src++;
+    while (c != '\0')
+    {
+        // Copy from src to dest, if current char is not one of the ones being stripped
+        if (strchr(strip_chars, c) == NULL)
+        {
+            *dest++ = c;
+            dest_len--;
+
+            // Exit loop, if only one character left in destination buffer, because we need to use that to
+            // NULL terminate the destination string
+            if (dest_len == 1)
+            {
+                break;
+            }
+        }
+
+        // Move to next char
+        c = *src++;
+    }
+
+    *dest = '\0';
+}
+
+/*********************************************************************//**
+**
 ** TEXT_UTILS_PercentEncodeString
 **
-** Converts any non-reserved characters in the input string to percent escaped characters in the output buffer
+** Converts any non-alphanumeric characters, which are also not in the specified set of safe characters, to percent encoded characters
 **
 ** \param   src - pointer to buffer containing string to percent encode
 ** \param   dst - pointer to buffer in which to store the percent encoded output string
 ** \param   dst_len - length of buffer in which to store the percent encoded output string
-** \param   safe_char - character which should not be percent encoded
+** \param   safe_chars - characters which should not be percent encoded (these are in addition to alphanumeric chars, which are never percent encoded)
+** \param   flags - flags controlling the encoding e.g. USE_LOWERCASE_HEX_DIGITS
 **
 ** \return  None
 **
 **************************************************************************/
-void TEXT_UTILS_PercentEncodeString(char *src, char *dst, int dst_len, char safe_char)
+void TEXT_UTILS_PercentEncodeString(char *src, char *dst, int dst_len, char *safe_chars, unsigned flags)
 {
     char c;
-    bool is_unreserved;
+    bool is_percent_encode;
     int num_required;
 
     // Reserve space in the destination buffer for a trailing NULL terminator
-    USP_ASSERT(dst_len > 0);    
+    USP_ASSERT(dst_len > 0);
     dst_len--;
-    
+
     c = *src++;
     while (c != '\0')
     {
-        // Determine if character is a unreserved character
-        is_unreserved =  IS_ALPHA_NUMERIC(c) || (c=='.') || (c=='~');
-
-        // Override for safe character, this is always left unencoded
-        if (c == safe_char)
+        // Determine if character should be percent encoded
+        if ((IS_ALPHA_NUMERIC(c) == false) && (strchr(safe_chars, c) == NULL))
         {
-            is_unreserved = true;
+            is_percent_encode = true;
+        }
+        else
+        {
+            is_percent_encode = false;
         }
 
         // Exit loop if there is not enough space for the (potentially escaped) character in the output buffer
-        num_required = (is_unreserved) ? 1 : 3;
+        num_required = (is_percent_encode) ? 3 : 1;
         if (dst_len < num_required)
         {
             goto exit;
         }
 
-        if (is_unreserved)
+        // Write the character to the output buffer
+        if (is_percent_encode)
         {
-            // Unreserved characters do not have to be percent encoded
-            *dst++ = c;
+            *dst++ = '%';
+            *dst++ = TEXT_UTILS_ValueToHexDigit( BITS(7, 4, c), flags);
+            *dst++ = TEXT_UTILS_ValueToHexDigit( BITS(3, 0, c), flags);
         }
         else
         {
-            *dst++ = '%';
-            *dst++ = TEXT_UTILS_ValueToHexDigit( BITS(7, 4, c));
-            *dst++ = TEXT_UTILS_ValueToHexDigit( BITS(3, 0, c));
+            *dst++ = c;
         }
 
         // Decrement space left in the output buffer and move to next input character
@@ -931,7 +1071,7 @@ exit:
 **
 ** Converts any percent escaped characters within a string buffer back to their character
 ** The changes to the string are made in-place within the input buffer
-** NOTE: Badly formed percent encoded characters are ignored. This makes the code more 
+** NOTE: Badly formed percent encoded characters are ignored. This makes the code more
 **       robust if the originator did not realise that the string had to be percent encoded
 **       For example: If the string contains a '%' character, but the originator forgot to percent encode it
 **
@@ -1056,36 +1196,47 @@ void TEXT_UTILS_ReplaceCharInString(char *src, char match_char, char *replacemen
 
 /*********************************************************************//**
 **
-** TEXT_UTILS_IsSymbol
+** TEXT_UTILS_HexStringToValue
 **
-** Determines whether the specified string is a valid symbol (ie contains only alpha-numeric characters)
+** Converts the specified string of hexadecimal characters into a value
+** NOTE: As this function returns errors using the value INVALID, it cannot accept strings longer than 7 characters
 **
-** \param   buf - pointer to buffer containing symbol to validate
+** \param   s - string of hexadecimal characters
 **
-** \return  true if the symbol is valid, false otherwise
+** \return  value of hex string, or INVALID if unable to convert the character
 **
 **************************************************************************/
-bool TEXT_UTILS_IsSymbol(char *buf)
+int TEXT_UTILS_HexStringToValue(char *s)
 {
-    int len;
     int i;
-    char c;
+    int len;
+    int value = 0;
+    int nibble;
 
-    // Iterate over all characters in the symbol, testing them for validity
-    len = strlen(buf);
-    for (i=0; i<len; i++)
+    // Prevent the string from erroneously converting to INVALID, by disallowing strings longer than 7 characters
+    // Also string must contain some hex digits
+    len = strlen(s);
+    if ((len == 0) || (len > 7))
     {
-        // Exit if encountered an illegal character
-        c = buf[i];
-        if (IS_ALPHA_NUMERIC(c) == false)
-        {
-            return false;
-        }
+        return INVALID;
     }
 
-    // If the code gets here, then all characters in the symbol were valid
-    return true;
+    // Iterate over all characters in the string
+    for (i=0; i<len; i++)
+    {
+        nibble = TEXT_UTILS_HexDigitToValue( s[i] );
+        if (nibble == INVALID)
+        {
+            return INVALID;
+        }
+
+        value = (value << 4) + nibble;
+    }
+
+    // If the code gets here, the string was converted successfully
+    return value;
 }
+
 
 /*********************************************************************//**
 **
@@ -1126,11 +1277,12 @@ int TEXT_UTILS_HexDigitToValue(char c)
 ** Converts the specified value into a hex character (0-F)
 **
 ** \param   nibble - value to convert (0-15)
+** \param   flags - flags controlling the encoding e.g. USE_LOWERCASE_HEX_DIGITS
 **
 ** \return  value of hex digit (nibble), or 'X' if unable to convert the value
 **
 **************************************************************************/
-char TEXT_UTILS_ValueToHexDigit(int nibble)
+char TEXT_UTILS_ValueToHexDigit(int nibble, unsigned flags)
 {
     if ((nibble >=0) && (nibble <=9))
     {
@@ -1139,7 +1291,14 @@ char TEXT_UTILS_ValueToHexDigit(int nibble)
 
     if ((nibble >= 10) && (nibble <=15))
     {
-        return nibble - 10 + 'A';
+        if (flags & USE_LOWERCASE_HEX_DIGITS)
+        {
+            return nibble - 10 + 'a';
+        }
+        else
+        {
+            return nibble - 10 + 'A';
+        }
     }
 
     // If the code gets here then the digit could not be converted
@@ -1163,37 +1322,55 @@ char TEXT_UTILS_ValueToHexDigit(int nibble)
 void TEXT_UTILS_PathToSchemaForm(char *path, char *buf, int len)
 {
     char c;
+    char *p;
+    char t;
+    int num_digits;
 
-    c = *path;
+    // Iterate over all characters in the path
+    c = *path++;
     while (c != '\0')
     {
-        if (IS_NUMERIC(c))
+        // If hit a path segment separator...
+        if (c == '.')
         {
-            // Replace number with schema instance separator in the output buffer
-            #define INSTANCE_SEPARATOR "{i}"
-            #define INSTANCE_SEPARATOR_LEN (sizeof(INSTANCE_SEPARATOR)-1)       // Minus 1 to not include NULL terminator
-            memcpy(buf, INSTANCE_SEPARATOR, INSTANCE_SEPARATOR_LEN);
-            buf += INSTANCE_SEPARATOR_LEN;
-            len -= INSTANCE_SEPARATOR_LEN;
+            // Determine the number of digits, if the following path segment is a number
+            num_digits = 0;
+            p = path;
+            t = *p++;
+            while (IS_NUMERIC(t))
+            {
+                num_digits++;
+                t = *p++;
+            }
 
-            // Skip to after number
-            path += TEXT_UTILS_CountConsecutiveDigits(path);
-        }
-        else
-        {
-            // Copy character into output buffer
-            *buf++ = c;
-            len--;
-            path ++;
+            // If the path segment is purely a number...
+            if ((num_digits > 0) && ((t == '.') || (t == '\0')))
+            {
+                // Copy the schema instance separator into the output buffer, instead of the number
+                #define INSTANCE_SEPARATOR ".{i}"
+                #define INSTANCE_SEPARATOR_LEN (sizeof(INSTANCE_SEPARATOR)-1)       // Minus 1 to not include NULL terminator
+                memcpy(buf, INSTANCE_SEPARATOR, INSTANCE_SEPARATOR_LEN);
+                buf += INSTANCE_SEPARATOR_LEN;
+                len -= INSTANCE_SEPARATOR_LEN;
+
+                // Skip to after number
+                path += num_digits;
+                c = *path++;
+                continue;
+            }
         }
 
-        // Exit if not enough space for output
+        // Otherwise copy current character into output buffer
+        *buf++ = c;
+        len--;
+
+        // Exit if not enough space for maximum possible number of characters which could be copied next iteration
         if (len < INSTANCE_SEPARATOR_LEN+1)        // Plus 1, so that we have enough space to copy the instance separator and a NULL terminator
         {
             goto exit;
         }
 
-        c = *path;
+        c = *path++;
     }
 
 exit:
@@ -1204,37 +1381,28 @@ exit:
 **
 ** TEXT_UTILS_CountConsecutiveDigits
 **
-** Determines the number of consecutive numeric digits in the string, 
+** Determines the number of consecutive numeric digits in the string,
 ** terminated by either a non digit character or the NULL terminator
 **
-** \param   s - pointer to string
+** \param   p - pointer to string
 **
 ** \return  Number of digts in the string. Note: This may be 0 if the first character is a non digit
 **
 **************************************************************************/
-int TEXT_UTILS_CountConsecutiveDigits(char *s)
+int TEXT_UTILS_CountConsecutiveDigits(char *p)
 {
-    int count = 0;
     char c;
+    int num_digits;
 
-    c = *s;
-    while(true)
-    {    
-        if (IS_NUMERIC(c))
-        {
-            // Increment count if hit a digit character
-            count++;
-        }
-        else
-        {
-            // Exit if hit a non-digit character (or NULL terminator)
-            return count;
-        }
-
-        // Move to next character
-        s++;
-        c = *s;
+    num_digits = 0;
+    c = *p++;
+    while (IS_NUMERIC(c))
+    {
+        num_digits++;
+        c = *p++;
     }
+
+    return num_digits;
 }
 
 /*********************************************************************//**
@@ -1391,7 +1559,7 @@ void TestSplitString(void)
             expected = split_string_test_cases[i+1+j];
             if (TEXT_UTILS_NullStringCompare(result, expected) != 0)
             {
-                printf("FAIL: [%d] Test case result %d is wrong (got %s, expected %s)", i/4, j, result, expected); 
+                printf("FAIL: [%d] Test case result %d is wrong (got %s, expected %s)", i/4, j, result, expected);
                 count++;
             }
         }
@@ -1433,7 +1601,7 @@ void TestStrStr(void)
         {
             if (result != NULL)
             {
-                printf("FAIL: [%d] Test case result is wrong (got '%s', expected NULL)\n", i/3, result); 
+                printf("FAIL: [%d] Test case result is wrong (got '%s', expected NULL)\n", i/3, result);
                 count++;
             }
         }
@@ -1468,6 +1636,18 @@ char *schema_form_test_cases[] =
     "Value.12458.",                 "Value.{i}.",
     "Value.14.Stuff.6752.Other",    "Value.{i}.Stuff.{i}.Other",
     "Value.1444.Stuff.2942",        "Value.{i}.Stuff.{i}",
+    "Value.14Stuff.6752.Other",    "Value.14Stuff.{i}.Other",
+    "Value.14.Stuff6752.Other",    "Value.{i}.Stuff6752.Other",
+    "Value.14.Stuff6752.Other.",    "Value.{i}.Stuff6752.Other.",
+    "Value.14.Stuff6752.",          "Value.{i}.Stuff6752.",
+    "Value.14.",                    "Value.{i}.",
+    "Value.14",                     "Value.{i}",
+    "Device.IPsec.IKEv2SA.1.",      "Device.IPsec.IKEv2SA.{i}.",
+    "Device.IPsec.IKEv2SA.{i}.",    "Device.IPsec.IKEv2SA.{i}.",
+    "Device.IPsec.IKEv2SA.{i}",     "Device.IPsec.IKEv2SA.{i}",
+    "Device.{i}.IKEv2SA.{i}",       "Device.{i}.IKEv2SA.{i}",
+    "Device...IKEv2SA.{i}",         "Device...IKEv2SA.{i}",
+
 };
 
 void Test_ToSchemaForm(void)
@@ -1548,7 +1728,7 @@ void Test_ToKeyValue(void)
                 count++;
             }
         }
-   
+
         // Check that returned value is correct
         if (to_key_value_test_cases[i+2] != NULL)
         {
@@ -1566,7 +1746,7 @@ void Test_ToKeyValue(void)
                 count++;
             }
         }
-   
+
         if (err != USP_ERR_OK)
         {
             if ((key != NULL) || (value != NULL))
@@ -1602,7 +1782,7 @@ void Test_ReplaceCharInString(void)
 
     for (i=0; i < NUM_ELEM(replace_char_test_cases); i+=2)
     {
-        
+
         TEXT_UTILS_ReplaceCharInString(replace_char_test_cases[i], ':', "\\c", buf, sizeof(buf));
 
         printf("[%d] '%s' => '%s'\n", i/2, replace_char_test_cases[i], buf);
@@ -1658,7 +1838,8 @@ void TestPercentEncodeString(void)
     for (i=0; i < NUM_ELEM(percent_encode_string_test_cases); i+=2)
     {
         strcpy(buf, percent_encode_string_test_cases[i]);
-        TEXT_UTILS_PercentEncodeString(percent_encode_string_test_cases[i], buf, sizeof(buf), '/');
+        TEXT_UTILS_PercentEncodeString(percent_encode_string_test_cases[i], buf, sizeof(buf), ".~-_/");
+
         if (strcmp(buf, percent_encode_string_test_cases[i+1]) != 0)
         {
             printf("ERROR: [%d] Test case result for '%s' is '%s' (expected '%s')\n", i/2, percent_encode_string_test_cases[i], buf, percent_encode_string_test_cases[i+1]);

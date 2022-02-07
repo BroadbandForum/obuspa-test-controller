@@ -1,33 +1,34 @@
 /*
  *
- * Copyright (C) 2019, Broadband Forum
- * Copyright (C) 2016-2019  CommScope, Inc
- * 
+ * Copyright (C) 2019-2021, Broadband Forum
+ * Copyright (C) 2016-2021  CommScope, Inc
+ * Copyright (C) 2020, BT PLC
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
- * 
+ *
  * 1. Redistributions of source code must retain the above copyright
  *    notice, this list of conditions and the following disclaimer.
- * 
+ *
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 
+ *
  * 3. Neither the name of the copyright holder nor the names of its
  *    contributors may be used to endorse or promote products derived from
  *    this software without specific prior written permission.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
  * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR 
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF 
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
  * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
  * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF 
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
  * THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
@@ -42,6 +43,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "common_defs.h"
 #include "usp_api.h"
@@ -53,6 +55,9 @@
 #include "nu_ipaddr.h"
 #include "text_utils.h"
 #include "uptime.h"
+#include "iso8601.h"
+#include "os_utils.h"
+#include "bdc_exec.h"
 
 
 
@@ -92,6 +97,23 @@ static reboot_info_t reboot_info;
 char *dual_stack_preference_path = "Internal.DualStackPreference";
 static bool dual_stack_prefer_ipv6 = false;
 
+
+//------------------------------------------------------------------------------
+// Structure containing input conditions for ScheduleTimer task
+typedef struct
+{
+    int request_instance;
+    time_t time_ref;
+    unsigned delay_seconds;
+} sched_timer_input_cond_t;
+
+//------------------------------------------------------------------------------------
+// Array of valid input arguments for ScheduleTimer() operation
+static char *sched_timer_input_args[] =
+{
+    "DelaySeconds",
+};
+
 //------------------------------------------------------------------------------
 // Forward declarations. Note these are not static, because we need them in the symbol table for USP_LOG_Callstack() to show them
 int Validate_DualStackPreference(dm_req_t *req, char *value);
@@ -104,6 +126,9 @@ int GetDefaultSerialNumber(char *buf, int len);
 int GetDefaultEndpointID(char *buf, int len, char *oui, char *serial_number);
 int PopulateRebootInfo(void);
 int GetActiveSoftwareVersion(dm_req_t *req, char *buf, int len);
+int Start_ScheduleTimer(dm_req_t *req, kv_vector_t *input_args, int instance);
+void *ScheduleTimerThreadMain(void *param);
+int Restart_ScheduleTimer(dm_req_t *req, int instance, bool *is_restart, int *err_code, char *err_msg, int err_msg_len, kv_vector_t *output_args);
 #ifndef REMOVE_DEVICE_INFO
 int GetHardwareVersion(dm_req_t *req, char *buf, int len);
 #endif
@@ -132,15 +157,13 @@ int DEVICE_LOCAL_AGENT_Init(void)
     err = USP_ERR_OK;
     err |= USP_REGISTER_VendorParam_ReadOnly("Device.LocalAgent.UpTime", GetUpTime, DM_UINT);
 
-    // Determine which protocol is used
-    #ifdef ENABLE_COAP
-        #define SUPPORTED_PROTOCOLS      "STOMP, CoAP"
-    #else
-        #define SUPPORTED_PROTOCOLS      "STOMP"
-    #endif
-
-    err |= USP_REGISTER_Param_Constant("Device.LocalAgent.SupportedProtocols", SUPPORTED_PROTOCOLS, DM_STRING);
+    // Register supported protocols and software version
+    err |= USP_REGISTER_Param_SupportedList("Device.LocalAgent.SupportedProtocols", mtp_protocols, NUM_ELEM(mtp_protocols));
     err |= USP_REGISTER_Param_Constant("Device.LocalAgent.SoftwareVersion", AGENT_SOFTWARE_VERSION, DM_STRING);
+
+    // Register ScheduleTimer operation
+    err |= USP_REGISTER_AsyncOperation("Device.ScheduleTimer()", Start_ScheduleTimer, Restart_ScheduleTimer);
+    err |= USP_REGISTER_OperationArguments("Device.ScheduleTimer()", sched_timer_input_args, NUM_ELEM(sched_timer_input_args), NULL, 0);
 
     // Register Reset and Reboot operations
     err |= USP_REGISTER_SyncOperation("Device.Reboot()", ScheduleReboot);
@@ -198,8 +221,8 @@ int DEVICE_LOCAL_AGENT_SetDefaults(void)
     char serial_number[MAX_DM_SHORT_VALUE_LEN];
 
     //-------------------------------------------------------------
-    // OUI
-    // Exit if unable to get the default value of OUI (ie the value if not overridden by the USP DB)
+    // ManufacturerOUI
+    // Exit if unable to get the default value of ManufacturerOUI (ie the value if not overridden by the USP DB)
     err = GetDefaultOUI(default_value, sizeof(default_value));
     if (err != USP_ERR_OK)
     {
@@ -220,10 +243,10 @@ int DEVICE_LOCAL_AGENT_SetDefaults(void)
     err = DATA_MODEL_GetParameterValue(manufacturer_oui_path, oui, sizeof(oui), 0);
 
 #ifdef REMOVE_DEVICE_INFO
-    // If vendor has not registered Device.DeviceInfo.OUI, then ignore the error, and use the default value
+    // If vendor has not registered Device.DeviceInfo.ManufacturerOUI, then ignore the error, and use the default value
     if (err == USP_ERR_INVALID_PATH)
     {
-        USP_LOG_Error("%s: Code configuration error: You must provide an implementation of Device.DeviceInfo.OUI if REMOVE_DEVICE_INFO is defined", __FUNCTION__);
+        USP_LOG_Error("%s: Code configuration error: You must provide an implementation of Device.DeviceInfo.ManufacturerOUI if REMOVE_DEVICE_INFO is defined", __FUNCTION__);
         return err;
     }
 #endif
@@ -312,8 +335,8 @@ int DEVICE_LOCAL_AGENT_Start(void)
     int err;
     char value[MAX_DM_SHORT_VALUE_LEN];
 
-    // Get the time (after boot) at which USP Agent was started 
-    usp_agent_start_time = (unsigned)tu_uptime_secs(); 
+    // Get the time (after boot) at which USP Agent was started
+    usp_agent_start_time = (unsigned)tu_uptime_secs();
 
     PopulateRebootInfo();
 
@@ -353,7 +376,7 @@ void DEVICE_LOCAL_AGENT_Stop(void)
 **
 ** DEVICE_LOCAL_AGENT_ScheduleReboot
 **
-** Schedules a reboot to occur once all connections have finished sending. 
+** Schedules a reboot to occur once all connections have finished sending.
 **
 ** \param   exit_action - action to perform on exit
 ** \param   reboot_cause - cause of reboot
@@ -389,6 +412,7 @@ int DEVICE_LOCAL_AGENT_ScheduleReboot(exit_action_t exit_action, char *reboot_ca
     }
 
     scheduled_exit_action = exit_action;
+    BDC_EXEC_ScheduleExit();
     MTP_EXEC_ScheduleExit();
     return USP_ERR_OK;
 }
@@ -542,7 +566,7 @@ int GetUpTime(dm_req_t *req, char *buf, int len)
 ** ScheduleReboot
 **
 ** Sync Operation handler for the Reboot operation
-** The vendor reboot function will be called once all connections have finished sending. 
+** The vendor reboot function will be called once all connections have finished sending.
 ** eg after the response message for this operation has been sent
 **
 ** \param   req - pointer to structure identifying the operation in the data model
@@ -570,7 +594,7 @@ int ScheduleReboot(dm_req_t *req, char *command_key, kv_vector_t *input_args, kv
 ** ScheduleFactoryReset
 **
 ** Sync Operation handler for the FactoryReset
-** The vendor reboot function will be called once all connections have finished sending. 
+** The vendor reboot function will be called once all connections have finished sending.
 ** eg after the response message for this operation has been sent
 **
 ** \param   req - pointer to structure identifying the operation in the data model
@@ -677,15 +701,15 @@ int GetDefaultSerialNumber(char *buf, int len)
         USP_STRNCPY(buf, "undefined", len);
         return USP_ERR_OK;
     }
-    
+
     // Convert MAC address into ASCII string form
     USP_ASSERT(len > 2*MAC_ADDR_LEN+1);
     p = buf;
     for (i=0; i<MAC_ADDR_LEN; i++)
     {
         val = mac_addr[i];
-        *p++ = TEXT_UTILS_ValueToHexDigit( (val & 0xF0) >> 4 );
-        *p++ = TEXT_UTILS_ValueToHexDigit( val & 0x0F );
+        *p++ = TEXT_UTILS_ValueToHexDigit( (val & 0xF0) >> 4, USE_UPPERCASE_HEX_DIGITS );
+        *p++ = TEXT_UTILS_ValueToHexDigit( val & 0x0F, USE_UPPERCASE_HEX_DIGITS );
     }
     *p = '\0';
 
@@ -700,7 +724,7 @@ int GetDefaultSerialNumber(char *buf, int len)
 ** Gets the default endpoint_id for this CPE
 ** This is the value of endpoint_id if it is not overriden by a value in the USP DB
 **
-** \param   endpoint_id - pointer to buffer in which to return the endpoint_id of this CPE
+** \param   buf - pointer to buffer in which to return the endpoint_id of this CPE
 ** \param   len - length of endpoint_id return buffer
 ** \param   oui - pointer to string containing oui of device
 ** \param   serial_number - pointer to string containing serial number of device
@@ -712,6 +736,8 @@ int GetDefaultEndpointID(char *buf, int len, char *oui, char *serial_number)
 {
     int err;
     dm_vendor_get_agent_endpoint_id_cb_t   get_agent_endpoint_id_cb;
+    char oui_encoded[MAX_DM_SHORT_VALUE_LEN];
+    char serial_number_encoded[MAX_DM_SHORT_VALUE_LEN];
 
     // Exit if endpoint_id is determined by a vendor hook
     get_agent_endpoint_id_cb = vendor_hook_callbacks.get_agent_endpoint_id_cb;
@@ -727,9 +753,13 @@ int GetDefaultEndpointID(char *buf, int len, char *oui, char *serial_number)
         return USP_ERR_OK;
     }
 
-    // Otherwise form the EndpointID from the retrieved OUI-SerialNumber
-    USP_ASSERT(serial_number[0] != '\0');
-    USP_SNPRINTF(buf, len, "os::%s-%s", oui, serial_number);
+    // Percent encode the OUI and serial number
+    #define SAFE_CHARS "-._"
+    TEXT_UTILS_PercentEncodeString(oui, oui_encoded, sizeof(oui_encoded), SAFE_CHARS, USE_UPPERCASE_HEX_DIGITS);
+    TEXT_UTILS_PercentEncodeString(serial_number, serial_number_encoded, sizeof(serial_number_encoded), SAFE_CHARS, USE_UPPERCASE_HEX_DIGITS);
+
+    // Form the final endpoint_id
+    USP_SNPRINTF(buf, len, "os::%s-%s", oui_encoded, serial_number_encoded);
 
     return USP_ERR_OK;
 }
@@ -740,7 +770,7 @@ int GetDefaultEndpointID(char *buf, int len, char *oui, char *serial_number)
 ** PopulateRebootInfo
 **
 ** Cache the cause (and command key) of the last reboot, then
-** setup the default cause and command key for the next reboot. 
+** setup the default cause and command key for the next reboot.
 ** This will be overridden if any other cause occurs
 **
 ** \param   None
@@ -841,7 +871,7 @@ int PopulateRebootInfo(void)
     // Save the last software version. Note that if this is from a factory reset, then use the current software version
     last_version = (last_value[0] == '\0') ? cur_value : last_value;
     reboot_info.last_software_version = USP_STRDUP(last_version);
-    
+
 
     // Save the software version used in this boot cycle, so next boot cycle we can see if its changed
     err = DATA_MODEL_SetParameterValue(last_software_version_path, cur_value, 0);
@@ -850,7 +880,7 @@ int PopulateRebootInfo(void)
         return err;
     }
 
-    // If the software version used in the last boot cycle differs from the one used 
+    // If the software version used in the last boot cycle differs from the one used
     // in this boot cycle, then the firmware has been updated, unless this was a factory reset
     if ((strcmp(last_value, cur_value) != 0) && (last_value[0] != '\0'))
     {
@@ -931,3 +961,138 @@ int GetHardwareVersion(dm_req_t *req, char *buf, int len)
     return USP_ERR_OK;
 }
 #endif // REMOVE_DEVICE_INFO
+
+/*********************************************************************//**
+**
+** Start_ScheduleTimer
+**
+** Starts the ScheduleTimer() operation
+**
+** \param   req - pointer to structure identifying the operation in the data model
+** \param   input_args - vector containing input arguments and their values
+** \param   instance - instance number of this operation in the Device.LocalAgent.Request table
+**
+** \return  USP_ERR_OK if successful
+**
+**************************************************************************/
+int Start_ScheduleTimer(dm_req_t *req, kv_vector_t *input_args, int instance)
+{
+    int err;
+    sched_timer_input_cond_t *cond = NULL;
+    char buf[MAX_ISO8601_LEN];
+
+    // Allocate input conditions to pass to thread
+    cond = USP_MALLOC(sizeof(sched_timer_input_cond_t));
+    memset(cond, 0, sizeof(sched_timer_input_cond_t));
+    cond->request_instance = instance;
+
+    // Exit if an error in reading DelaySeconds, or DelaySeconds is not specified
+    #define INVALID_DELAY_SECONDS 0xFFFFFFFF
+    err = USP_ARG_GetUnsigned(input_args, "DelaySeconds", INVALID_DELAY_SECONDS, &cond->delay_seconds);
+    if (err != USP_ERR_OK)
+    {
+        goto exit;
+    }
+
+    if (cond->delay_seconds == INVALID_DELAY_SECONDS)
+    {
+        USP_ERR_SetMessage("%s: DelaySeconds argument not specified", __FUNCTION__);
+        err = USP_ERR_COMMAND_FAILURE;
+        goto exit;
+    }
+
+    // Exit if unable to extract the time at which this operation was issued
+    // NOTE: This may not be the current time, if this operation is being restarted after a reboot that interrupted it
+    err = USP_ARG_GetDateTime(input_args, SAVED_TIME_REF_ARG_NAME, iso8601_cur_time(buf, sizeof(buf)), &cond->time_ref);
+    if (err != USP_ERR_OK)
+    {
+        goto exit;
+    }
+
+    // Log the input conditions for the operation
+    USP_LOG_Info("=== ScheduleTimer Conditions ===");
+    USP_LOG_Info("TimeRef: %s", iso8601_from_unix_time(cond->time_ref, buf, sizeof(buf)) );
+    USP_LOG_Info("DelaySeconds: %d", cond->delay_seconds);
+
+    // Exit if unable to start a thread to perform this operation
+    // NOTE: ownership of input conditions passes to the thread
+    err = OS_UTILS_CreateThread(ScheduleTimerThreadMain, cond);
+    if (err != USP_ERR_OK)
+    {
+        goto exit;
+    }
+
+exit:
+    // Exit if an error occurred (freeing the input conditions)
+    if (err != USP_ERR_OK)
+    {
+        USP_FREE(cond);
+        return USP_ERR_COMMAND_FAILURE;
+    }
+
+    // Ownership of the input conditions has passed to the thread
+    return USP_ERR_OK;
+}
+
+/*********************************************************************//**
+**
+** Restart_ScheduleTimer
+**
+** This function is called at bootup to determine whether to restart the ScheduleTimer() Async Operations
+**
+** \param   req - pointer to structure containing path information
+** \param   instance - instance number of this operation in the Request table
+** \param   is_restart - pointer to variable in which to return whether the operation should be restarted or not
+**
+**                     The following parameters are only used if the operation should not be restarted
+**                     They determine the values placed in the operation complete message
+** \param   err_code - pointer to variable in which to return an error code
+** \param   err_msg - pointer to buffer in which to return an error message (only used if error code is failed)
+** \param   err_msg_len - length of buffer in which to return an error message (only used if error code is failed)
+** \param   output_args - pointer to structure in which to return output arguments for the operation
+**
+** \return  USP_ERR_OK if validated successfully
+**
+**************************************************************************/
+int Restart_ScheduleTimer(dm_req_t *req, int instance, bool *is_restart, int *err_code, char *err_msg, int err_msg_len, kv_vector_t *output_args)
+{
+    *is_restart = true;
+    return USP_ERR_OK;
+}
+
+/*********************************************************************//**
+**
+** ScheduleTimerThreadMain
+**
+** Main function for ScheduleTimer Asynchronous operation thread
+**
+** \param   param - pointer to input conditions
+**
+** \return  NULL
+**
+**************************************************************************/
+void *ScheduleTimerThreadMain(void *param)
+{
+    time_t cur_time;
+    int delay;
+    sched_timer_input_cond_t *cond = (sched_timer_input_cond_t *) param;
+
+    // Calculate time left to delay for
+    // NOTE: This number might be negative if the timer was scheduled to fire when the device was turned off
+    cur_time = time(NULL);
+    delay = (int)(cond->time_ref - cur_time) + cond->delay_seconds;
+
+    // Wait until the timer is scheduled to fire
+    if (delay > 0)
+    {
+        sleep(delay);
+    }
+
+    USP_LOG_Info("=== ScheduleTimer completed ===");
+    USP_SIGNAL_OperationComplete(cond->request_instance, USP_ERR_OK, NULL, NULL);
+
+    // Free the input conditions that were passed into this function as an argument
+    USP_FREE(cond);
+
+    return NULL;
+}

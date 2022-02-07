@@ -1,33 +1,33 @@
 /*
  *
- * Copyright (C) 2019, Broadband Forum
- * Copyright (C) 2016-2019  CommScope, Inc
- * 
+ * Copyright (C) 2019-2021, Broadband Forum
+ * Copyright (C) 2016-2021  CommScope, Inc
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
- * 
+ *
  * 1. Redistributions of source code must retain the above copyright
  *    notice, this list of conditions and the following disclaimer.
- * 
+ *
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 
+ *
  * 3. Neither the name of the copyright holder nor the names of its
  *    contributors may be used to endorse or promote products derived from
  *    this software without specific prior written permission.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
  * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR 
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF 
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
  * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
  * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF 
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
  * THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
@@ -60,6 +60,7 @@ typedef enum
     kSqlStmt_Get=0,
     kSqlStmt_Set,
     kSqlStmt_Del,
+    kSqlStmt_AllEntriesForHash,
 
     kSqlStmt_Max            // Always last in the enumeration - used to size arrays
 } sql_stmt_t;
@@ -72,7 +73,8 @@ static char *prepared_stmt_sql[kSqlStmt_Max] =
 {
     "select value from data_model where hash = ?1 and instances = ?2;",           // kSqlStmt_Get
     "insert or replace into data_model(hash,instances,value) values(?1, ?2, ?3);", // kSqlStmt_Set
-    "delete from data_model where hash = ?1 and instances = ?2;"                  // kSqlStmt_Del
+    "delete from data_model where hash = ?1 and instances = ?2;",                 // kSqlStmt_Del
+    "select instances, value from data_model where hash= ?1;"                     // kSqlStmt_AllEntriesForHash
 };
 
 //--------------------------------------------------------------------
@@ -84,7 +86,7 @@ char database_filename[128];
 
 //--------------------------------------------------------------------
 // SQLite uses -1 as a length argument to denote that the string is zero terminated (so no length needs to be passed)
-#define SQLITE_ZERO_TERMINATED (-1) 
+#define SQLITE_ZERO_TERMINATED (-1)
 
 //--------------------------------------------------------------------
 // Set if a factory reset initialisation of the database should potentially be performed in DATABASE_Start()
@@ -95,6 +97,23 @@ static bool schedule_factory_reset_init = false;
 char *factory_reset_text_file = NULL;
 
 //--------------------------------------------------------------------
+typedef struct
+{
+    char *old_path;         // Schema path to migrate from
+    char *new_path;         // Schema path to migrate to
+    db_hash_t old_hash;     // hash for the old_path, calculated in DATABASE_Start()
+    db_hash_t new_hash;     // hash for the new_path, calculated in DATABASE_Start()
+} path_migrate_t;
+
+// List of parameters to migrate to new parameter names in the USP DB
+path_migrate_t paths_to_migrate[] =
+{
+#ifndef DISABLE_STOMP
+    { "Device.STOMP.Connection.{i}.X_ARRIS-COM_EnableEncryption", "Device.STOMP.Connection.{i}.EnableEncryption", 0, 0},
+#endif
+};
+
+//--------------------------------------------------------------------
 // Forward declarations. Note these are not static, because we need them in the symbol table for USP_LOG_Callstack() to show them
 int PrepareSQLStatements(void);
 int OpenUspDatabase(char *db_file);
@@ -103,6 +122,9 @@ int CopyFactoryResetDatabase(char *reset_file, char *db_file);
 int ResetFactoryParameters(void);
 int ResetFactoryParametersFromFile(char *file);
 void LogSQLStatement(char *op, char *path, sqlite3_stmt *stmt);
+int CalcPathMigrationHashes(void);
+int MigratePath(path_migrate_t *pm);
+int GetAllEntriesForParameter(db_hash_t hash, kv_vector_t *kvv);
 
 /*********************************************************************//**
 **
@@ -148,7 +170,7 @@ int DATABASE_Init(char *db_file)
         fclose(fp);
     }
 
-    // Exit if unable to open the database    
+    // Exit if unable to open the database
     USP_LOG_Info("%s: Opening database %s", __FUNCTION__, db_file);
     err = OpenUspDatabase(db_file);
     if (err != USP_ERR_OK)
@@ -173,9 +195,18 @@ int DATABASE_Init(char *db_file)
 **************************************************************************/
 int DATABASE_Start(void)
 {
+    int i;
     int err;
+    path_migrate_t *pm;
 
-    // Initialise the database with it's factory reset parameters (if required)
+    // Calculate the DB hash of each parameter that is to be migrated
+    err = CalcPathMigrationHashes();
+    if (err != USP_ERR_OK)
+    {
+        return err;
+    }
+
+    // Initialise the database with its factory reset parameters (if required)
     if (schedule_factory_reset_init)
     {
 #ifdef INCLUDE_PROGRAMMATIC_FACTORY_RESET
@@ -198,6 +229,13 @@ int DATABASE_Start(void)
         }
 
         schedule_factory_reset_init = false;
+    }
+
+    // Migrate all paths that have changed to new DB entries
+    for (i=0; i<NUM_ELEM(paths_to_migrate); i++)
+    {
+        pm = &paths_to_migrate[i];
+        (void)MigratePath(pm);  // Intentionally ignoring errors
     }
 
     return USP_ERR_OK;
@@ -259,7 +297,7 @@ void DATABASE_PerformFactoryReset_ControllerInitiated(void)
 
     // Close the current database
     DATABASE_Destroy();
-    
+
     // Exit if unable to delete the current database file
     err = remove(db_file);
     if ((err == -1) && (errno != ENOENT))
@@ -271,7 +309,7 @@ void DATABASE_PerformFactoryReset_ControllerInitiated(void)
     // Copy across the factory reset database (which has reboot cause set to "LocalFactoryReset")
     CopyFactoryResetDatabase(FACTORY_RESET_FILE, db_file);
 
-    // Exit if unable to open the database    
+    // Exit if unable to open the database
     err = OpenUspDatabase(db_file);
     if (err != USP_ERR_OK)
     {
@@ -376,7 +414,7 @@ int DATABASE_GetParameterValue(char *path, dm_hash_t hash, char *instances, char
     stmt = prepared_stmts[kSqlStmt_Get];
 
     // Exit if unable to set the value of the hash in the prepared statement
-    err = sqlite3_bind_int64(stmt, 1, hash);
+    err = sqlite3_bind_int64(stmt, 1, (db_hash_t)hash);
     if (err != SQLITE_OK)
     {
         USP_ERR_SQL_PARAM(db_handle, "sqlite3_bind_int");
@@ -412,7 +450,7 @@ int DATABASE_GetParameterValue(char *path, dm_hash_t hash, char *instances, char
         goto exit;
     }
 
-    // Determine the length of the value string to copy into the return buffer, truncating it, if it is too long    
+    // Determine the length of the value string to copy into the return buffer, truncating it, if it is too long
     value_len = sqlite3_column_bytes(stmt, 0);
     value_len = MIN(value_len, buflen-1);
 
@@ -449,7 +487,7 @@ exit:
     {
         USP_ERR_SQL_PARAM(db_handle, "sqlite3_reset");
     }
-    
+
     return result;
 }
 
@@ -499,7 +537,7 @@ int DATABASE_SetParameterValue(char *path, dm_hash_t hash, char *instances, char
 
     // Exit if unable to set the value of the hash in the prepared statement
     stmt = prepared_stmts[kSqlStmt_Set];
-    err = sqlite3_bind_int64(stmt, 1, hash);
+    err = sqlite3_bind_int64(stmt, 1, (db_hash_t)hash);
     if (err != SQLITE_OK)
     {
         USP_ERR_SQL_PARAM(db_handle, "sqlite3_bind_int");
@@ -542,7 +580,7 @@ exit:
     {
         USP_ERR_SQL_PARAM(db_handle, "sqlite3_reset");
     }
-    
+
     return result;
 }
 
@@ -576,7 +614,7 @@ int DATABASE_DeleteParameter(char *path, dm_hash_t hash, char *instances)
     stmt = prepared_stmts[kSqlStmt_Del];
 
     // Exit if unable to set the value of the hash in the prepared statement
-    err = sqlite3_bind_int64(stmt, 1, hash);
+    err = sqlite3_bind_int64(stmt, 1, (db_hash_t)hash);
     if (err != SQLITE_OK)
     {
         USP_ERR_SQL_PARAM(db_handle, "sqlite3_bind_int");
@@ -612,7 +650,7 @@ exit:
     {
         USP_ERR_SQL_PARAM(db_handle, "sqlite3_reset");
     }
-    
+
     return result;
 }
 
@@ -630,7 +668,7 @@ exit:
 int DATABASE_StartTransaction(void)
 {
     int err;
-    
+
     // Exit if this function is not being called from the data model thread
     if (OS_UTILS_IsDataModelThread(__FUNCTION__, PRINT_WARNING)==false)
     {
@@ -661,7 +699,7 @@ int DATABASE_StartTransaction(void)
 int DATABASE_CommitTransaction(void)
 {
     int err;
-    
+
     // Exit if this function is not being called from the data model thread
     if (OS_UTILS_IsDataModelThread(__FUNCTION__, PRINT_WARNING)==false)
     {
@@ -771,15 +809,45 @@ int DATABASE_ReadDataModelInstanceNumbers(bool remove_unknown_params)
         }
     }
 
-    // Always reset the statement in preparation for next time, even if an error occurred
+    // 'Free' the statement
     sql_err = sqlite3_finalize(stmt);
     if (sql_err != SQLITE_OK)
     {
         USP_ERR_SQL(db_handle,"sqlite3_finalize");
         result = USP_ERR_INTERNAL_ERROR;
     }
-    
+
     return result;
+}
+
+/*********************************************************************//**
+**
+** DATABASE_GetMigratedHash
+**
+** Returns a different parameter hash value if the given parameter is to be migrated
+**
+** \param   hash - hash identifying the data model parameter to see if it needs migrating
+**
+** \return  hash of the parameter. This will be a different hash if migrated, or the same hash if parameter does not have to be migrated
+**
+**************************************************************************/
+db_hash_t DATABASE_GetMigratedHash(db_hash_t hash)
+{
+    int i;
+    path_migrate_t *pm;
+
+    // Iterate over all paths to migrate, exiting if the specified hash matches one to migrate
+    for (i=0; i < NUM_ELEM(paths_to_migrate); i++)
+    {
+        pm = &paths_to_migrate[i];
+        if (pm->old_hash == hash)
+        {
+            return pm->new_hash;
+        }
+    }
+
+    // If the code gets here, then the path was not migrated, so return the originally specified hash without modification
+    return hash;
 }
 
 /*********************************************************************//**
@@ -833,7 +901,7 @@ void DATABASE_Dump(void)
         hash = sqlite3_column_int(stmt, 0);
         instances = (char *)sqlite3_column_text(stmt, 1);
         value = (char *)sqlite3_column_text(stmt, 2);
-        
+
         result = DM_PRIV_FormPath_FromDB(hash, instances, path, sizeof(path));
         if (result == USP_ERR_OK)
         {
@@ -1025,7 +1093,7 @@ int ResetFactoryParameters(void)
     {
         kv = &params.vector[i];
 
-        // Exit if a parameter was not in the data model or failed to set    
+        // Exit if a parameter was not in the data model or failed to set
         err = DATA_MODEL_SetParameterInDatabase(kv->key, kv->value);
         if (err != USP_ERR_OK)
         {
@@ -1092,7 +1160,7 @@ int ResetFactoryParametersFromFile(char *file)
                 goto exit;
             }
         }
-        
+
         // Get the next line
         line_number++;
         result = fgets(buf, sizeof(buf), fp);
@@ -1140,7 +1208,7 @@ void LogSQLStatement(char *op, char *path, sqlite3_stmt *stmt)
 **
 ** ObfuscatedCopy
 **
-** Copies the specified source value into the destination buffer, 
+** Copies the specified source value into the destination buffer,
 ** whilst obfuscating/unobfuscating it
 ** NOTE: Obfuscation may result in embedded NULLs within the destination, or
 **       be the cause of embedded NULLs in the src
@@ -1167,3 +1235,211 @@ void ObfuscatedCopy(unsigned char *dest, unsigned char *src, int len)
         src++;
     }
 }
+
+/*********************************************************************//**
+**
+** CalcPathMigrationHashes
+**
+** Populates the paths_to_migrate[] structure with the hashes of the old and new schema paths
+**
+** \param   None
+**
+** \return  USP_ERR_OK if successful
+**
+**************************************************************************/
+int CalcPathMigrationHashes(void)
+{
+    int i;
+    path_migrate_t *pm;
+    dm_node_t *node;
+    dm_hash_t old_hash;
+    int err;
+
+    for (i=0; i < NUM_ELEM(paths_to_migrate); i++)
+    {
+        pm = &paths_to_migrate[i];
+
+        // Exit if unable to obtain the hash of the legacy parameter
+        // NOTE: The legacy parameter does not have to be present in the data model
+        err = DM_PRIV_CalcHashFromPath(pm->old_path, NULL, &old_hash);
+        if (err != USP_ERR_OK)
+        {
+            USP_LOG_Error("%s: Legacy schema path '%s' incorrect in paths_to_migrate[%d] (%s)", __FUNCTION__, pm->old_path, i, USP_ERR_GetMessage());
+            return USP_ERR_INVALID_PATH;
+        }
+        pm->old_hash = (db_hash_t) old_hash;
+
+        // Exit if unable to obtain the hash of the new parameter
+        // NOTE: This also checks that the new parameter is present in the data model
+        node = DM_PRIV_GetNodeFromPath(pm->new_path, NULL, NULL);
+        if (node == NULL)
+        {
+            USP_LOG_Error("%s: new schema path '%s' in paths_to_migrate[%d] is not present in the data model", __FUNCTION__, pm->new_path, i);
+            return USP_ERR_INVALID_PATH;
+        }
+        pm->new_hash = (db_hash_t) node->hash;
+    }
+
+    return USP_ERR_OK;
+}
+
+/*********************************************************************//**
+**
+** MigratePath
+**
+** Migrates all entries in the DB of the specified schema path to the new schema path
+**
+** \param   pm - pointer to entry in the paths_to_migrate[] array specifyting the migration information
+**
+** \return  USP_ERR_OK if successful
+**
+**************************************************************************/
+int MigratePath(path_migrate_t *pm)
+{
+    int i;
+    int err;
+    kv_vector_t kvv;
+    kv_pair_t *kv;
+    char *instances;
+    dm_instances_t inst;
+    char old_param[MAX_DM_PATH];
+    char new_param[MAX_DM_PATH];
+
+    // Exit if unable to get all entries for the legacy parameter
+    err = GetAllEntriesForParameter(pm->old_hash, &kvv);
+    if (err != USP_ERR_OK)
+    {
+        goto exit;
+    }
+
+    // Iterate over all entries, replacing the old entry with the new entry
+    for (i=0; i < kvv.num_entries; i++)
+    {
+        kv = &kvv.vector[i];
+        instances = kv->key;
+
+        // Exit if unable to parse the instance numbers from the string
+        memset(&inst, 0, sizeof(inst));
+        err = DM_PRIV_ParseInstanceString(instances, &inst);
+        if (err != USP_ERR_OK)
+        {
+            USP_LOG_Error("%s: Instance numbers ('%s') for hash=%d are invalid", __FUNCTION__, instances, pm->old_hash);
+            return USP_ERR_INTERNAL_ERROR;
+        }
+
+        // Skip if unable to form old instantiated path of this entry
+        // NOTE: This will only occur if the number of instance numbers in the database do not match the number in the schema path
+        err = DM_PRIV_FormInstantiatedPath(pm->old_path, &inst, old_param, sizeof(old_param));
+        if (err != USP_ERR_OK)
+        {
+            USP_LOG_Error("%s: Skipping migrating %s for instances %s (%s)", __FUNCTION__, pm->old_path, instances, USP_ERR_GetMessage());
+            continue;
+        }
+
+        // Skip if unable to form new instantiated path of this entry
+        // NOTE: This will only occur if the number of instance numbers in the database do not match the number in the schema path
+        err = DM_PRIV_FormInstantiatedPath(pm->new_path, &inst, new_param, sizeof(new_param));
+        if (err != USP_ERR_OK)
+        {
+            USP_LOG_Error("%s: Skipping migrating to %s for instances %s (%s)", __FUNCTION__, pm->new_path, instances, USP_ERR_GetMessage());
+            continue;
+        }
+        USP_LOG_Info("%s: Migrating '%s' to '%s'", __FUNCTION__, old_param, new_param);
+
+        // Add the new entry first, so that if it fails, the old entry will still be present in the DB
+        err = DATABASE_SetParameterValue(new_param, pm->new_hash, instances, kv->value, 0);
+        if (err != USP_ERR_OK)
+        {
+            goto exit;
+        }
+
+        // Exit if unable to delete legacy entry
+        err = DATABASE_DeleteParameter(old_param, pm->old_hash, instances);
+        if (err != USP_ERR_OK)
+        {
+            goto exit;
+        }
+    }
+
+exit:
+    KV_VECTOR_Destroy(&kvv);
+    return err;
+}
+
+/*********************************************************************//**
+**
+** GetAllEntriesForParameter
+**
+** Gets the value of all instantiated parameters for the path specified by hash
+**
+** \param   hash - hash identifying the data model parameter to get
+** \param   kvv - pointer to key value vector in which to return all instances (key) and values (value) of the specified parameter
+**
+** \return  USP_ERR_OK if successful
+**
+**************************************************************************/
+int GetAllEntriesForParameter(db_hash_t hash, kv_vector_t *kvv)
+{
+    sqlite3_stmt *stmt;
+    int sql_err;
+    int err;
+    int result = USP_ERR_INTERNAL_ERROR;        // Assume an error
+    char *instances;
+    char *value;
+
+    // Set default return values
+    KV_VECTOR_Init(kvv);
+
+    // Decide which prepared statement to use
+    stmt = prepared_stmts[kSqlStmt_AllEntriesForHash];
+
+    // Exit if unable to set the value of the hash in the statement
+    err = sqlite3_bind_int64(stmt, 1, hash);
+    if (err != SQLITE_OK)
+    {
+        USP_ERR_SQL_PARAM(db_handle, "sqlite3_bind_int");
+        return USP_ERR_INTERNAL_ERROR;
+    }
+
+    // Iterate over all instances of the specified parameter
+    sql_err = SQLITE_ROW;
+    while (sql_err == SQLITE_ROW)
+    {
+        sql_err = sqlite3_step(stmt);
+        if (sql_err == SQLITE_DONE)
+        {
+            // Exit loop if we have processed all rows
+            result = USP_ERR_OK;
+            break;
+        }
+        else if (sql_err != SQLITE_ROW)
+        {
+            // An error occurred
+            USP_ERR_SQL(db_handle,"sqlite3_step");
+            result = USP_ERR_INTERNAL_ERROR;
+            break;
+        }
+
+        // Skip this row if no instances or value found
+        // NOTE: This should never happen if the software is working correctly
+        instances = (char *)sqlite3_column_text(stmt, 0);
+        value = (char *)sqlite3_column_text(stmt, 1);
+        if ((instances == NULL) || (value == NULL))
+        {
+            continue;
+        }
+
+        // Add this entry to the key-value vector
+        KV_VECTOR_Add(kvv, instances, value);
+    }
+
+    // Always reset the statement in preparation for next time, even if an error occurred
+    err = sqlite3_reset(stmt);
+    if (err != SQLITE_OK)
+    {
+        USP_ERR_SQL_PARAM(db_handle, "sqlite3_reset");
+    }
+
+    return result;
+}
+

@@ -83,7 +83,7 @@ Usp__Msg *CreateSet(bool allow_partial, char obj_paths[MAX_PATHS][VALUE_SIZE], b
 Usp__Msg *CreateOperate(char command[VALUE_SIZE], char command_key[VALUE_SIZE], char keys[MAX_PARAMVALUE][PARAM_SIZE], char values[MAX_PARAMVALUE][VALUE_SIZE], bool send_resp, int n);
 int Controller_Start(char *db_file, bool enable_mem_info);
 int StartBasicAgentProcesses(char *db_file);
-mtp_reply_to_t *InitializeMTPStructure(void);
+void InitializeMTPStructure(void);
 
 // parameters collected from first line and used globally
 char *msg_id = "1";
@@ -94,6 +94,8 @@ int stomp_instance = 0;
 char *coap_host = "";
 int coap_port = 0;
 char *coap_resource = "/";
+char *mqtt_topic = "";
+int mqtt_instance = 0;
 char *line_msg_type;
 mtp_reply_to_t mtp_send;
 
@@ -133,13 +135,17 @@ int ParseFirstLine(char line[LINE_SIZE])
                 agent_endpoint = strdup(value);
             else if(strcmp(param, "coap_host") == 0)
                 coap_host = strdup(value);
-	    else if(strcmp(param, "coap_port") == 0) 
+            else if(strcmp(param, "coap_port") == 0) 
                 coap_port = atoi(value);
             else if(strcmp(param, "coap_resource") == 0)
                 coap_resource = strdup(value);
+            else if(strcmp(param, "mqtt_topic") == 0)
+                mqtt_topic = strdup(value);
+            else if(strcmp(param, "mqtt_instance") == 0) 
+                mqtt_instance = atoi(value);
             else
             {
-            printf("Unrecognized parameter name: %s", param);
+                printf("Unrecognized parameter name: %s\n", param);
             }
             break;
         }
@@ -162,13 +168,17 @@ int ParseFirstLine(char line[LINE_SIZE])
                 agent_endpoint = strdup(value);
             else if(strcmp(param, "coap_host") == 0)
                 coap_host = strdup(value);
-	    else if(strcmp(param, "coap_port") == 0) 
+            else if(strcmp(param, "coap_port") == 0) 
                 coap_port = atoi(value);
             else if(strcmp(param, "coap_resource") == 0)
                 coap_resource = strdup(value);
+            else if(strcmp(param, "mqtt_topic") == 0)
+                mqtt_topic = strdup(value);
+            else if(strcmp(param, "mqtt_instance") == 0) 
+                mqtt_instance = atoi(value);
             else
             {
-            printf("Unrecognized parameter name: %s", param);
+                printf("Unrecognized parameter name: %s\n", param);
             }
             memset(param,0,PARAM_SIZE);
             memset(value,0,VALUE_SIZE);
@@ -278,7 +288,6 @@ int ParseGet(char line[LINE_SIZE])
     char value[VALUE_SIZE]; // stores parameter value
     int value_start = 0; // set to 1 if subsequent characters are to be read into value
     Usp__Msg *get_message;
-    mtp_reply_to_t *mtp_send_to;
 
     for(x=0;x<LINE_SIZE;x++)
     {
@@ -330,9 +339,8 @@ int ParseGet(char line[LINE_SIZE])
         }
     }
     // put the message in the protobufs structure and send it
-    mtp_send_to = InitializeMTPStructure();
     get_message = CreateGet(p_paths, n);
-    MSG_HANDLER_QueueMessage(agent_endpoint, get_message, mtp_send_to);
+    MSG_HANDLER_QueueMessage(agent_endpoint, get_message, &mtp_send);
     usp__msg__free_unpacked(get_message, pbuf_allocator);
     return(0);
 }
@@ -362,7 +370,6 @@ int ParseGetSupportedDM(char line[LINE_SIZE])
     char value[VALUE_SIZE]; // stores parameter value
     int value_start = 0; // set to 1 if subsequent characters are to be read into value
     Usp__Msg *get_supported_dm_message;
-    mtp_reply_to_t *mtp_send_to;
 
     for(x=0;x<LINE_SIZE;x++)
     {
@@ -439,9 +446,8 @@ int ParseGetSupportedDM(char line[LINE_SIZE])
         }
     }
     // put the message in the protobufs structure and send it
-    mtp_send_to = InitializeMTPStructure();
     get_supported_dm_message = CreateGetSupportedDM(obj_paths, n, first_level_only, return_commands, return_events, return_params);
-    MSG_HANDLER_QueueMessage(agent_endpoint, get_supported_dm_message, mtp_send_to);
+    MSG_HANDLER_QueueMessage(agent_endpoint, get_supported_dm_message, &mtp_send);
     usp__msg__free_unpacked(get_supported_dm_message, pbuf_allocator);
     return(0);
 }
@@ -472,7 +478,6 @@ int ParseAdd(char line[LINE_SIZE])
     char value[VALUE_SIZE]; // stores parameter value
     int value_start = 0; // set to 1 if subsequent characters are to be read into value
     Usp__Msg *add_message;
-    mtp_reply_to_t *mtp_send_to;
 
     for(x=0;x<LINE_SIZE;x++)
     {
@@ -514,12 +519,13 @@ int ParseAdd(char line[LINE_SIZE])
             param_start = 0;
             j = 0;
         }
-	else if(c == '{' && quote_start == 0)
+        else if(c == '{' && quote_start == 0)
         {
             param[j] = '\0';
             if(strcmp(param, "create_objs") == 0) {
                 o++;
-		n = 0; }
+                n = 0;
+            }
 
             memset(param,0,PARAM_SIZE);
             memset(value,0,VALUE_SIZE);
@@ -534,7 +540,7 @@ int ParseAdd(char line[LINE_SIZE])
                 value[j] = '\0';
                 if((strcmp(param, "param") == 0) && (o>0))
                     strcpy(param_settings_param[o-1][n], value);
-		else if((strcmp(param, "value") == 0) && (o>0))
+                else if((strcmp(param, "value") == 0) && (o>0))
                     strcpy(param_settings_value[o-1][n], value);
                 else if((strcmp(param, "required") == 0) && (o>0)){
                     if(strcmp(value, "true") == 0)
@@ -546,11 +552,11 @@ int ParseAdd(char line[LINE_SIZE])
                     strcpy(obj_path[o-1], value);
                 n++;
             }
-	    else if(o>0)
-	    {
+            else if(o>0)
+            {
                 n_param_settings[o-1] = n;
-		n = 0;
-	    }
+                n = 0;
+            }
             memset(param,0,PARAM_SIZE);
             memset(value,0,VALUE_SIZE);
             param_start = 1;
@@ -570,9 +576,8 @@ int ParseAdd(char line[LINE_SIZE])
         }
     }
     // put the message in the protobufs structure and send it
-    mtp_send_to = InitializeMTPStructure();
     add_message = CreateAdd(allow_partial, obj_path, required, n_param_settings, param_settings_param, param_settings_value, o);
-    MSG_HANDLER_QueueMessage(agent_endpoint, add_message, mtp_send_to);
+    MSG_HANDLER_QueueMessage(agent_endpoint, add_message, &mtp_send);
     usp__msg__free_unpacked(add_message, pbuf_allocator);
 
     return(0);
@@ -604,7 +609,6 @@ int ParseSet(char line[LINE_SIZE])
     char value[VALUE_SIZE]; // stores parameter value
     int value_start = 0; // set to 1 if subsequent characters are to be read into value
     Usp__Msg *set_message;
-    mtp_reply_to_t *mtp_send_to;
 
     for(x=0;x<LINE_SIZE;x++)
     {
@@ -646,12 +650,14 @@ int ParseSet(char line[LINE_SIZE])
             param_start = 0;
             j = 0;
         }
-	else if(c == '{' && quote_start == 0)
+        else if(c == '{' && quote_start == 0)
         {
             param[j] = '\0';
-            if(strcmp(param, "update_objs") == 0) {
+            if(strcmp(param, "update_objs") == 0)
+            {
                 o++;
-		n = 0; }
+                n = 0;
+            }
 
             memset(param,0,PARAM_SIZE);
             memset(value,0,VALUE_SIZE);
@@ -666,7 +672,7 @@ int ParseSet(char line[LINE_SIZE])
                 value[j] = '\0';
                 if((strcmp(param, "param") == 0) && (o>0))
                     strcpy(param_settings_param[o-1][n], value);
-		else if((strcmp(param, "value") == 0) && (o>0))
+                else if((strcmp(param, "value") == 0) && (o>0))
                     strcpy(param_settings_value[o-1][n], value);
                 else if((strcmp(param, "required") == 0) && (o>0)){
                     if(strcmp(value, "true") == 0)
@@ -676,13 +682,13 @@ int ParseSet(char line[LINE_SIZE])
                         allow_partial = true; }
                 else if((strcmp(param, "obj_path") == 0) && (o>0))
                     strcpy(obj_path[o-1], value);
-		n++;
+            n++;
             }
-	    else if(o>0)
-	    {
+            else if(o>0)
+            {
                 n_param_settings[o-1] = n;
-		n = 0;
-	    }
+                n = 0;
+            }
             memset(param,0,PARAM_SIZE);
             memset(value,0,VALUE_SIZE);
             param_start = 1;
@@ -702,9 +708,8 @@ int ParseSet(char line[LINE_SIZE])
         }
     }
     // put the message in the protobufs structure and send it
-    mtp_send_to = InitializeMTPStructure();
     set_message = CreateSet(allow_partial, obj_path, required, n_param_settings, param_settings_param, param_settings_value, o);
-    MSG_HANDLER_QueueMessage(agent_endpoint, set_message, mtp_send_to);
+    MSG_HANDLER_QueueMessage(agent_endpoint, set_message, &mtp_send);
     usp__msg__free_unpacked(set_message, pbuf_allocator);
     return(0);
 }
@@ -730,7 +735,6 @@ int ParseDelete(char line[LINE_SIZE])
     char value[VALUE_SIZE]; // stores parameter value
     int value_start = 0; // set to 1 if subsequent characters are to be read into value
     Usp__Msg *delete_message;
-    mtp_reply_to_t *mtp_send_to;
 
     for(x=0;x<LINE_SIZE;x++)
     {
@@ -783,9 +787,8 @@ int ParseDelete(char line[LINE_SIZE])
         }
     }
     // put the message in the protobufs structure and send it
-    mtp_send_to = InitializeMTPStructure();
     delete_message = CreateDelete(obj_paths, n);
-    MSG_HANDLER_QueueMessage(agent_endpoint, delete_message, mtp_send_to);
+    MSG_HANDLER_QueueMessage(agent_endpoint, delete_message, &mtp_send);
     usp__msg__free_unpacked(delete_message, pbuf_allocator);
     return(0);
 }
@@ -815,7 +818,6 @@ int ParseOperate(char line[LINE_SIZE])
     char value[VALUE_SIZE]; // stores parameter value
     int value_start = 0; // set to 1 if subsequent characters are to be read into value
     Usp__Msg *operate_message;
-    mtp_reply_to_t *mtp_send_to;
 
     for(x=0;x<LINE_SIZE;x++)
     {
@@ -825,7 +827,7 @@ int ParseOperate(char line[LINE_SIZE])
             value[j] = '\0';
             if(strcmp(param, "param") == 0) {
                 strcpy(param_settings_param[n], value); }
-	    else if(strcmp(param, "value") == 0) {
+            else if(strcmp(param, "value") == 0) {
                 strcpy(param_settings_value[n], value);
                 n++; }
             else if(strcmp(param, "send_resp") == 0) {
@@ -885,9 +887,8 @@ int ParseOperate(char line[LINE_SIZE])
         }
     }
     // put the message in the protobufs structure and send it
-    mtp_send_to = InitializeMTPStructure();
     operate_message = CreateOperate(command, command_key, param_settings_param, param_settings_value, send_resp, n);
-    MSG_HANDLER_QueueMessage(agent_endpoint, operate_message, mtp_send_to);
+    MSG_HANDLER_QueueMessage(agent_endpoint, operate_message, &mtp_send);
     usp__msg__free_unpacked(operate_message, pbuf_allocator);
 
     return(0);
@@ -913,7 +914,6 @@ int ParseGetSupportedProtocol(char line[LINE_SIZE])
     char value[VALUE_SIZE]; // stores parameter value
     int value_start = 0; // set to 1 if subsequent characters are to be read into value
     Usp__Msg *get_supported_protocol_message;
-    mtp_reply_to_t *mtp_send_to;
 
     for(x=0;x<LINE_SIZE;x++)
     {
@@ -959,9 +959,8 @@ int ParseGetSupportedProtocol(char line[LINE_SIZE])
         }
     }
     // put the message in the protobufs structure and send it
-    mtp_send_to = InitializeMTPStructure();
     get_supported_protocol_message = CreateGetSupportedProtocol(versions);
-    MSG_HANDLER_QueueMessage(agent_endpoint, get_supported_protocol_message, mtp_send_to);
+    MSG_HANDLER_QueueMessage(agent_endpoint, get_supported_protocol_message, &mtp_send);
     usp__msg__free_unpacked(get_supported_protocol_message, pbuf_allocator);
     return(0);
 }
@@ -988,7 +987,6 @@ int ParseGetInstances(char line[LINE_SIZE])
     char value[VALUE_SIZE]; // stores parameter value
     int value_start = 0; // set to 1 if subsequent characters are to be read into value
     Usp__Msg *get_instances_message;
-    mtp_reply_to_t *mtp_send_to;
 
     for(x=0;x<LINE_SIZE;x++)
     {
@@ -1047,9 +1045,8 @@ int ParseGetInstances(char line[LINE_SIZE])
         }
     }
     // put the message in the protobufs structure and send it
-    mtp_send_to = InitializeMTPStructure();
     get_instances_message = CreateGetInstances(obj_paths, n, first_level_only);
-    MSG_HANDLER_QueueMessage(agent_endpoint, get_instances_message, mtp_send_to);
+    MSG_HANDLER_QueueMessage(agent_endpoint, get_instances_message, &mtp_send);
     usp__msg__free_unpacked(get_instances_message, pbuf_allocator);
     return(0);
 }
@@ -1314,7 +1311,7 @@ Usp__Msg *CreateAdd(bool allow_partial, char obj_paths[MAX_PATHS][VALUE_SIZE], b
         strcpy(single_path, obj_paths[x]);
         create_obj->obj_path = USP_STRDUP(single_path);
         create_obj->param_settings = USP_REALLOC(create_obj->param_settings, create_obj->n_param_settings*sizeof(void *));
-	// populate the set of parameter/value pairs to include in the added object instance
+        // populate the set of parameter/value pairs to include in the added object instance
         for(y=0;y<n_p_settings[x];y++)
         {
             setting = USP_MALLOC(sizeof(Usp__Add__CreateParamSetting));
@@ -1605,14 +1602,14 @@ Usp__Msg *CreateDelete(char obj_paths[MAX_PATHS][VALUE_SIZE], int n)
 
 /***********************************************************************
 **
-** Initialize mtp_send_to parameter
+** Initialize mtp_reply_to_t parameter
 **
-** Sets values in the mtp_send_to structure, as determined by first line of file
+** Sets values in the mtp_reply_to_t structure, as determined by first line of file
 **
-** \return  pointer to mtp_send_to structure 
+** \return void 
 **
 **************************************************************************/
-mtp_reply_to_t *InitializeMTPStructure(void)
+void InitializeMTPStructure(void)
 {
     // Allocate memory to store MTP info
 
@@ -1621,12 +1618,44 @@ mtp_reply_to_t *InitializeMTPStructure(void)
     mtp_send.coap_host = coap_host;
     mtp_send.coap_port = coap_port;
     mtp_send.coap_resource = coap_resource;
-    if (strlen(mtp_send.stomp_dest) > 0) {
-        mtp_send.protocol = kMtpProtocol_STOMP; }
-    else if (mtp_send.coap_port > 0) {
-        mtp_send.protocol = kMtpProtocol_CoAP; }
+    mtp_send.mqtt_topic = mqtt_topic;
+    mtp_send.mqtt_instance = mqtt_instance;
+    mtp_send.protocol = kMtpProtocol_None;
     mtp_send.is_reply_to_specified = true;
-    return &mtp_send;
+
+    if (strlen(mtp_send.stomp_dest) > 0)
+    {
+#ifndef DISABLE_STOMP
+        mtp_send.protocol = kMtpProtocol_STOMP;
+#else
+        USP_LOG_Error("STOMP is not supported");
+#endif
+    }
+    else if (mtp_send.coap_port > 0) 
+    {
+#ifdef ENABLE_COAP
+        mtp_send.protocol = kMtpProtocol_CoAP; 
+#else
+        USP_LOG_Error("CoAP is not supported");
+#endif
+    }
+    else if (mtp_send.mqtt_instance > 0) 
+    {
+#ifdef ENABLE_MQTT
+        mtp_send.protocol = kMtpProtocol_MQTT; 
+#else
+        USP_LOG_Error("MQTT is not supported");
+#endif
+    }
+
+    if (mtp_send.protocol != kMtpProtocol_None)
+    {
+        USP_LOG_Info("%s protocol is used as MTP.", DEVICE_MTP_EnumToString(mtp_send.protocol)); 
+    }
+    else
+    {
+        USP_LOG_Error("Invalid or missing MTP in first line.");
+    }
 }
 
 /***********************************************************************
@@ -1646,14 +1675,17 @@ int StartBasicAgentProcesses(char *db_file)
     int err;
     bool enable_mem_info = false;
 
-    // Sleep until other services which USP Agent processes use (eg DNS) are running
-    // (ideally USP Agent should be started when the services are running, rather than sleeping here. But sometimes, there is no easy way to ensure this).
+    // Following debug is only logged when running as a daemon (not when running as CLI client).
+    USP_LOG_Info("USP Controller starting...");
+
+    // Sleep until other services which USP Controller uses (eg DNS) are running
+    // (ideally USP Controller should be started when the services are running, rather than sleeping here. But sometimes, there is no easy way to ensure this).
     if (DAEMON_START_DELAY_MS > 0)
     {
         usleep(DAEMON_START_DELAY_MS*1000);
     }
 
-    // Exit if unable to start USP Agent processes
+    // Exit if unable to start USP Controller processes
     err = Controller_Start(db_file, enable_mem_info);
     if (err != USP_ERR_OK)
     {
@@ -1661,11 +1693,13 @@ int StartBasicAgentProcesses(char *db_file)
     }
 
     // Exit if unable to spawn off a thread to service the MTPs
+#ifndef DISABLE_STOMP
     err = OS_UTILS_CreateThread(MTP_EXEC_StompMain, NULL);
     if (err != USP_ERR_OK)
     {
         goto exit;
     }
+#endif
 
 #ifdef ENABLE_COAP
     err = OS_UTILS_CreateThread(MTP_EXEC_CoapMain, NULL);
@@ -1675,7 +1709,14 @@ int StartBasicAgentProcesses(char *db_file)
     }
 #endif
 
-    // Not bothering with bulk data set up; just return
+#ifdef ENABLE_MQTT
+    err = OS_UTILS_CreateThread(MTP_EXEC_MqttMain, NULL);
+    if (err != USP_ERR_OK)
+    {
+        goto exit;
+    }
+#endif
+
     // Exit if unable to spawn off a thread to perform bulk data collection posts
     err = OS_UTILS_CreateThread(BDC_EXEC_Main, NULL);
     if (err != USP_ERR_OK)
@@ -1688,7 +1729,7 @@ int StartBasicAgentProcesses(char *db_file)
 
 exit:
     // If the code gets here, an error occurred
-    USP_LOG_Error("USP Agent aborted unexpectedly");
+    USP_LOG_Error("USP Controller aborted unexpectedly");
     return -1;
 }
 /*************************************************************************
@@ -1771,6 +1812,7 @@ int Controller_Start(char *db_file, bool enable_mem_info)
         return err;
     }
 
+#ifndef DISABLE_STOMP
     // Start the STOMP connections. This must be done here, before other parts of the data model that require stomp connections
     // to queue messages (eg object creation/deletion notifications)
     err = DEVICE_STOMP_StartAllConnections();
@@ -1778,6 +1820,17 @@ int Controller_Start(char *db_file, bool enable_mem_info)
     {
         return err;
     }
+#endif
+
+#ifdef ENABLE_MQTT
+    // Start the MQTT connections. This must be done here, before other parts of the data model that require MQTT clients
+    // to queue messages (eg object creation/deletion notifications)
+    err = DEVICE_MQTT_StartAllClients();
+    if (err != USP_ERR_OK)
+    {
+        return err;
+    }
+#endif
 
     return USP_ERR_OK;
 }
@@ -1802,8 +1855,10 @@ int CTRL_FILE_PARSER_Start(char *controller_file, char *db_file)
     FILE *fp;
 
     err = StartBasicAgentProcesses(db_file);
+    if (err != USP_ERR_OK) { return(err); }
+
     fp = fopen(controller_file,"r"); // open the file
-    if( fp == NULL ) // make sure the file actually exists
+    if (fp == NULL) // make sure the file actually exists
     {
         printf("Cannot find %s\n", controller_file);
         return(1);
@@ -1811,9 +1866,15 @@ int CTRL_FILE_PARSER_Start(char *controller_file, char *db_file)
 
     while (fgets(line, sizeof(line), fp))
     {
-        if(i == 0)
+        // Skip the line if comment out or empty line
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r' || line[0] == '\0')
+            continue;
+
+        if (i == 0)
         {
-            ParseFirstLine(line);
+            err = ParseFirstLine(line);
+            if (err != USP_ERR_OK) { return(err); }
+            InitializeMTPStructure();
             i++;
         }
         else
@@ -1845,6 +1906,15 @@ int CTRL_FILE_PARSER_Start(char *controller_file, char *db_file)
     sleep(2*WAIT_BETWEEN_MSGS); // wait before closing to make sure all messages were sent
     /* close */
     fclose(fp);
+
+    USP_LOG_Info("USP Controller stopping...");
+    BDC_EXEC_ScheduleExit();
+    MTP_EXEC_ScheduleExit();
+    MTP_EXEC_ActivateScheduledActions();
+
+    // wait 1s to give enough time to the running threads 
+    // to terminate, before closing handles and freeing memory.
+    sleep(1);
     MAIN_Stop();
     return(err);
 }

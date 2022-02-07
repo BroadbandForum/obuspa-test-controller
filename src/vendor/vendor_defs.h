@@ -1,33 +1,34 @@
 /*
  *
- * Copyright (C) 2019-2020, Broadband Forum
- * Copyright (C) 2016-2020  CommScope, Inc
- * 
+ * Copyright (C) 2019-2021, Broadband Forum
+ * Copyright (C) 2016-2021  CommScope, Inc
+ * Copyright (C) 2020, BT PLC
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
- * 
+ *
  * 1. Redistributions of source code must retain the above copyright
  *    notice, this list of conditions and the following disclaimer.
- * 
+ *
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 
+ *
  * 3. Neither the name of the copyright holder nor the names of its
  *    contributors may be used to endorse or promote products derived from
  *    this software without specific prior written permission.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
  * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR 
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF 
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
  * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
  * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF 
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
  * THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
@@ -45,7 +46,6 @@
 //------------------------------------------------------------------------------
 // Definitions used to size static arrays
 // You are unlikely to need to change these
-#define MAX_DM_INSTANCES 128      // Maximum number of instances of a single object
 #define MAX_DM_INSTANCE_ORDER 6   // Maximum number of instance numbers in a data model schema path (ie number of '{i}' in the schema path)
 #define MAX_DM_PATH (256)           // Maximum number of characters in a data model path
 #define MAX_DM_VALUE_LEN (4096)     // Maximum number of characters in a data model parameter value
@@ -60,11 +60,16 @@
 #define MAX_COAP_SERVERS 5          // Maximum number of interfaces which an agent listens for CoAP messages on
 #define MAX_COAP_CLIENTS (MAX_CONTROLLERS)  // Maximum number of CoAP controllers which an agent sends to
 #define MAX_COAP_SERVER_SESSIONS 2      // Maxiumum number of simultaneous sessions with CoAP controllers which the agent can service
-#define MAX_FIRMWARE_IMAGES 2       // Maximum number of firmware images that the CPE can hold in flash at any one time
-#define MAX_ACTIVATE_TIME_WINDOWS 5 // Maximum number of time windows allowed in the Activate() command's input arguments
+#define MAX_MQTT_SUBSCRIPTIONS 5
+#define MAX_WEBSOCKET_CLIENTS (MAX_CONTROLLERS)  // Maximum number of WebSocket controllers which an agent sends to
+#define MAX_NODE_MAP_BUCKETS  1024  // Maximum number of buckets in the data model node map. This should be set to at least the number of registered parameters and objects in the data model
 
-// Maximum number of bytes allowed in a USP protobuf message. 
-// This is not used to size any arrays, just used as a security measure to prevent rogue controllers crashing 
+// NB: If you change this, you must also change the SSL callback functions within mqtt.c
+// This will compile fail if you do not
+#define MAX_MQTT_CLIENTS (5)  // Maximum number of MQTT Client Connections (Device.MQTT.Client.{i})
+
+// Maximum number of bytes allowed in a USP protobuf message.
+// This is not used to size any arrays, just used as a security measure to prevent rogue controllers crashing
 // the agent process with out of memory
 #define MAX_USP_MSG_LEN (64*1024)
 
@@ -78,6 +83,23 @@
 // Location of unix domain stream file used for CLI communication between client and server
 #define CLI_UNIX_DOMAIN_FILE                "/tmp/usp_cli"
 
+// Location of file or directory containing certificates to report in Device.Security.Certificate
+// NOTE: These certificates are not added to the agent's trust store
+#define SYSTEM_CERT_PATH                     ""      /* "/etc/ssl/certs" */
+
+//-----------------------------------------------------------------------------------------
+// Definitions associated with grouped parameter get/set
+// Each group represents a software component that can set/get a list of data model parameters in a single operation via RPC/messaging
+#define MAX_VENDOR_PARAM_GROUPS  10 // Maximum number of software components that implement the data model
+
+// Uncomment the following define to perform each parameter set individually, rather than in a group
+// This must be uncommented if the underlying data model implementation does not support commit/abort transactional semantics
+//#define SET_GROUPED_PARAMETERS_INDIVIDUALLY
+
+// Uncomment the following define to perform each parameter get individually, rather than in a group
+// Typically, this would only be used during development testing/debugging
+//#define GET_GROUPED_PARAMETERS_INDIVIDUALLY
+
 //-----------------------------------------------------------------------------------------
 // Defines associated with factory reset database
 // Location of the file containing a factory reset database (SQLite database file)
@@ -85,18 +107,20 @@
 #define FACTORY_RESET_FILE      ""
 
 // Uncomment the following to get the values of the factory reset parameters from VENDOR_GetFactoryResetParams()
-#define INCLUDE_PROGRAMMATIC_FACTORY_RESET
+// #define INCLUDE_PROGRAMMATIC_FACTORY_RESET
 
 //-----------------------------------------------------------------------------------------
 // Uncomment the following to remove code and features from the standard build
 //#define REMOVE_DEVICE_INFO               // Removes DeviceInfo from the core data model. It must instead be provided by the vendor.
+//#define REMOVE_DEVICE_TIME               // Removes Device.Time from the core data model. It must instead be provided by the vendor.
 //#define REMOVE_SELF_TEST_DIAG_EXAMPLE    // Removes Self Test diagnostics example code
 
 //#define DONT_SORT_GET_INSTANCES          // Disables the sorting of data model paths returned in a GetInstancesResponse. Useful for slow devices supporting large data models.
 
 // Uncomment the following defines to add code and features to the standard build
-//#define VALIDATE_OUTPUT_ARG_NAMES        // Checks that the output argument names in operations and events formed by code in USP Agent 
+//#define VALIDATE_OUTPUT_ARG_NAMES        // Checks that the output argument names in operations and events formed by code in USP Agent
                                            // match the schema registered in the data model by USP_REGISTER_OperationArguments() and USP_REGISTER_EventArguments
+
 //-----------------------------------------------------------------------------------------
 // The following define controls whether STOMP connects over the default WAN interface, or
 // whether the Linux routing tables can decide which interface to use
@@ -104,6 +128,10 @@
 // Letting the Linux routing tables decide is better for devices that can connect to the STOMP server through either
 // WiFi or ethernet, and either of these interfaces could be down at any one time
 #define CONNECT_ONLY_OVER_WAN_INTERFACE
+
+//-----------------------------------------------------------------------------------------
+// Uncomment the following define for the GetResponse to contain a resolved_path_result for every object (and sub object)
+//#define GET_RESPONSE_SIMPLE_FORMAT
 
 //-----------------------------------------------------------------------------------------
 // OUI (Organization Unique Identifier) to use for this CPE. This code will be unique to the manufacturer
@@ -130,7 +158,7 @@
 #define PASSWORD_OBFUSCATION_KEY  "$%^&*()@~#/,?"
 
 // Timeout (in seconds) when performing a connect to a STOMP broker
-#define STOMP_CONNECT_TIMEOUT 30
+#define STOMP_CONNECT_TIMEOUT 10
 
 // Number of seconds after a STOMP server heartbeat was expected, before retrying the connection
 #define STOMP_SERVER_HEARTBEAT_GRACE_PERIOD 10
@@ -150,7 +178,7 @@
 //       If after modifying, you are unsure, try reading back the default values from an empty database and checking that they make sense
 #define BULKDATA_MAX_PROFILES 5                    // Maximum number of bulk data profiles supported
 #define BULKDATA_MAX_RETAINED_FAILED_REPORTS 3     // Maximum number of retained failed bulk data reports
-#define BULKDATA_MINIMUM_REPORTING_INTERVAL 300    // Minimum supported reporting interval, in seconds
+#define BULKDATA_MINIMUM_REPORTING_INTERVAL 1    // Minimum supported reporting interval, in seconds
 #define BULKDATA_HTTP_AUTH_METHOD  CURLAUTH_BASIC  // HTTP Authentication method to use. Note: Normally over https
 
 #define BULKDATA_CONNECT_TIMEOUT 30   // Timeout (in seconds) when attempting to connect to a bulk data collection server

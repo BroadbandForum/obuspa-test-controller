@@ -1,33 +1,34 @@
 /*
  *
- * Copyright (C) 2019, Broadband Forum
- * Copyright (C) 2016-2019  CommScope, Inc
- * 
+ * Copyright (C) 2019-2021, Broadband Forum
+ * Copyright (C) 2016-2021  CommScope, Inc
+ * Copyright (C) 2020, BT PLC
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
- * 
+ *
  * 1. Redistributions of source code must retain the above copyright
  *    notice, this list of conditions and the following disclaimer.
- * 
+ *
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 
+ *
  * 3. Neither the name of the copyright holder nor the names of its
  *    contributors may be used to endorse or promote products derived from
  *    this software without specific prior written permission.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
  * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR 
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF 
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
  * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
  * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF 
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
  * THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
@@ -60,6 +61,10 @@ static int cur_msg_controller_instance = INVALID;
 // Role to use with current USP message
 // This is saved off before handling each message, as each message handler needs it fairly deeply in its processing
 static combined_role_t cur_msg_combined_role = { ROLE_DEFAULT, ROLE_DEFAULT};
+
+//------------------------------------------------------------------------
+// Role to use with current USP message
+static controller_info_t cur_msg_controller_info;
 
 //------------------------------------------------------------------------
 // Array used to convert from an enumeration to it's string representation
@@ -103,13 +108,12 @@ void CacheControllerRoleForCurMsg(char *endpoint_id, ctrust_role_t role, mtp_pro
 ** \param   pbuf - pointer to buffer containing protobuf encoded USP record
 ** \param   pbuf_len - length of protobuf encoded message
 ** \param   role - Role allowed for this message
-** \param   allowed_controllers - URN pattern containing the endpoint_id of allowed controllers
 ** \param   mrt - details of where response to this USP message should be sent
 **
 ** \return  USP_ERR_OK if successful, USP_ERR_MESSAGE_NOT_UNDERSTOOD if unable to unpack the USP Record
 **
 **************************************************************************/
-int MSG_HANDLER_HandleBinaryRecord(unsigned char *pbuf, int pbuf_len, ctrust_role_t role, char *allowed_controllers, mtp_reply_to_t *mrt)
+int MSG_HANDLER_HandleBinaryRecord(unsigned char *pbuf, int pbuf_len, ctrust_role_t role, mtp_reply_to_t *mrt)
 {
     int err;
     UspRecord__Record *rec;
@@ -133,7 +137,7 @@ int MSG_HANDLER_HandleBinaryRecord(unsigned char *pbuf, int pbuf_len, ctrust_rol
     PROTO_TRACE_ProtobufMessage(&rec->base);
 
     // Process the encapsulated USP message
-    err = MSG_HANDLER_HandleBinaryMessage(rec->no_session_context->payload.data, rec->no_session_context->payload.len, role, allowed_controllers, rec->from_id, mrt);
+    err = MSG_HANDLER_HandleBinaryMessage(rec->no_session_context->payload.data, rec->no_session_context->payload.len, role, rec->from_id, mrt);
 
 exit:
     // Free the unpacked USP record
@@ -151,14 +155,13 @@ exit:
 ** \param   pbuf - pointer to buffer containing protobuf encoded USP message
 ** \param   pbuf_len - length of protobuf encoded message
 ** \param   role - Role allowed for this message
-** \param   allowed_controllers - URN containing the endpoint_id of allowed controllers
 ** \param   controller_endpoint - endpoint which sent this message
 ** \param   mrt - details of where response to this USP message should be sent
 **
 ** \return  USP_ERR_OK if successful, USP_ERR_MESSAGE_NOT_UNDERSTOOD if unable to unpack the USP Record
 **
 **************************************************************************/
-int MSG_HANDLER_HandleBinaryMessage(unsigned char *pbuf, int pbuf_len, ctrust_role_t role, char *allowed_controllers, char *controller_endpoint, mtp_reply_to_t *mrt)
+int MSG_HANDLER_HandleBinaryMessage(unsigned char *pbuf, int pbuf_len, ctrust_role_t role, char *controller_endpoint, mtp_reply_to_t *mrt)
 {
     int err;
     Usp__Msg *usp;
@@ -221,7 +224,7 @@ void MSG_HANDLER_LogMessageToSend(Usp__Header__MsgType usp_msg_type, unsigned ch
 
     // Log the message
     USP_PROTOCOL("\n");
-    USP_LOG_Info("%s sending at time %s, to host %s over %s", 
+    USP_LOG_Info("%s sending at time %s, to host %s over %s",
                 MSG_HANDLER_UspMsgTypeToString(usp_msg_type),
                 iso8601_cur_time(buf, sizeof(buf)),
                 host,
@@ -285,7 +288,7 @@ void MSG_HANDLER_LogMessageToSend(Usp__Header__MsgType usp_msg_type, unsigned ch
 
     // Print USP message in human readable form
     PROTO_TRACE_ProtobufMessage(&usp->base);
-    
+
     // Free the protobuf structures
     usp__msg__free_unpacked(usp, pbuf_allocator);
     usp_record__record__free_unpacked(rec, pbuf_allocator);
@@ -317,13 +320,13 @@ void MSG_HANDLER_HandleUnknownMsgType(Usp__Msg *usp, char *controller_endpoint, 
 /*********************************************************************//**
 **
 ** MSG_HANDLER_QueueMessage
-** 
+**
 ** Serializes a USP message to a buffer, then queues it, to be sent to a controller
-** 
+**
 ** \param   endpoint_id - controller to send the message to
 ** \param   usp - pointer to protobuf-c structure describing the USP message to send
 ** \param   mrt - details of where this USP response message should be sent
-** 
+**
 ** \return  USP_ERR_OK if successful
 **
 **************************************************************************/
@@ -359,10 +362,10 @@ int MSG_HANDLER_QueueMessage(char *endpoint_id, Usp__Msg *usp, mtp_reply_to_t *m
 /*********************************************************************//**
 **
 ** MSG_HANDLER_QueueUspRecord
-** 
+**
 ** Serializes a protobuf USP record structure to a buffer (with encapsulated USP message),
 ** then queues it, to be sent to a controller
-** 
+**
 ** \param   usp_msg_type - Type of USP message contained in pbuf. This is used for debug logging when the message is sent by the MTP.
 ** \param   endpoint_id - controller to send the message to
 ** \param   pbuf - pointer to buffer containing serialized USP message
@@ -371,7 +374,7 @@ int MSG_HANDLER_QueueMessage(char *endpoint_id, Usp__Msg *usp, mtp_reply_to_t *m
 ** \param   usp_msg_id - pointer to string containing the msg_id of the serialized USP Message
 ** \param   mrt - details of where this USP response message should be sent
 ** \param   expiry_time - time at which the USP message should be removed from the MTP send queue
-** 
+**
 ** \return  USP_ERR_OK if successful
 **
 **************************************************************************/
@@ -393,7 +396,7 @@ int MSG_HANDLER_QueueUspRecord(Usp__Header__MsgType usp_msg_type, char *endpoint
     // Fill in the USP Record structure
     // NOTE: This is all statically allocated (or owned elsewhere), so no need to free
     usp_record__record__init(&rec);
-    rec.version = "1.0";
+    rec.version = AGENT_CURRENT_PROTOCOL_VERSION;
     rec.to_id = endpoint_id;
     rec.from_id = DEVICE_LOCAL_AGENT_GetEndpointID();
     rec.payload_security = USP_RECORD__RECORD__PAYLOAD_SECURITY__PLAINTEXT;
@@ -468,6 +471,22 @@ void MSG_HANDLER_GetMsgRole(combined_role_t *combined_role)
 
 /*********************************************************************//**
 **
+** MSG_HANDLER_GetControllerInfo
+**
+** Gets the controller info structure for the current message being processed
+**
+** \param   controller_info - pointer to controller info structure
+**
+** \return  None
+**
+**************************************************************************/
+void MSG_HANDLER_GetControllerInfo(controller_info_t *controller_info)
+{
+    *controller_info = cur_msg_controller_info;
+}
+
+/*********************************************************************//**
+**
 ** MSG_HANDLER_GetMsgControllerEndpointId
 **
 ** Gets the endpoint_id of the controller that sent the message which is currently being processed
@@ -480,7 +499,7 @@ void MSG_HANDLER_GetMsgRole(combined_role_t *combined_role)
 char *MSG_HANDLER_GetMsgControllerEndpointId(void)
 {
     char *endpoint_id;
-    
+
     // Exit in case of running a CLI command, and hence no controller instance setup
     if (cur_msg_controller_instance == INVALID)
     {
@@ -493,7 +512,7 @@ char *MSG_HANDLER_GetMsgControllerEndpointId(void)
     {
         return "";
     }
-    
+
     return endpoint_id;
 }
 
@@ -549,7 +568,7 @@ int HandleUspMessage(Usp__Msg *usp, char *controller_endpoint, mtp_reply_to_t *m
     }
 
     // Log the message
-    USP_LOG_Info("%s : processing at time %s", 
+    USP_LOG_Info("%s : processing at time %s",
                 MSG_HANDLER_UspMsgTypeToString(usp->header->msg_type),
                 iso8601_cur_time(buf, sizeof(buf)) );
 
@@ -563,11 +582,11 @@ int HandleUspMessage(Usp__Msg *usp, char *controller_endpoint, mtp_reply_to_t *m
         case USP__HEADER__MSG_TYPE__SET:
             MSG_HANDLER_HandleSet(usp, controller_endpoint, mrt);
             break;
-    
+
         case USP__HEADER__MSG_TYPE__ADD:
             MSG_HANDLER_HandleAdd(usp, controller_endpoint, mrt);
             break;
-    
+
         case USP__HEADER__MSG_TYPE__DELETE:
             MSG_HANDLER_HandleDelete(usp, controller_endpoint, mrt);
             break;
@@ -622,19 +641,12 @@ int ValidateUspRecord(UspRecord__Record *rec)
     char *endpoint_id;
     UspRecord__NoSessionContextRecord *ctx;
 
-    // Exit if unsupported version
-    if ((rec->version == NULL) || (strcmp(rec->version, "1.0") != 0))
-    {
-        USP_ERR_SetMessage("%s: Ignoring USP record with unsupported version (%s)", __FUNCTION__, rec->version);
-        return USP_ERR_RECORD_FIELD_INVALID;
-    }
-
     // Exit if this record is not supposed to be processed by us
     endpoint_id = DEVICE_LOCAL_AGENT_GetEndpointID();
     if ((rec->to_id == NULL) || (strcmp(rec->to_id, endpoint_id) != 0))
     {
-        USP_LOG_Warning("%s: WARNING: Ignoring USP record as it was addressed to endpoint_id=%s", __FUNCTION__, rec->to_id);
-        return USP_ERR_OK;
+        USP_LOG_Warning("%s: WARNING: Ignoring USP record as it was addressed to endpoint_id=%s not %s", __FUNCTION__, rec->to_id, endpoint_id);
+        return USP_ERR_REQUEST_DENIED;
     }
 
     // Exit if no USP destination to send the message back to
@@ -644,7 +656,7 @@ int ValidateUspRecord(UspRecord__Record *rec)
         return USP_ERR_RECORD_FIELD_INVALID;
     }
 
-    // Exit if this record contains an encrypted payload. 
+    // Exit if this record contains an encrypted payload.
     if (rec->payload_security != USP_RECORD__RECORD__PAYLOAD_SECURITY__PLAINTEXT)
     {
         USP_ERR_SetMessage("%s: Ignoring USP record as it contains an encrypted payload", __FUNCTION__);
@@ -657,11 +669,10 @@ int ValidateUspRecord(UspRecord__Record *rec)
         USP_LOG_Warning("%s: WARNING: Not performing integrity check on non-payload fields of received USP Record", __FUNCTION__);
     }
 
-    // Exit if ignoring sender certificate
+    // Ignore sender certificate
     if ((rec->sender_cert.len != 0) || (rec->sender_cert.data != NULL))
     {
-        USP_ERR_SetMessage("%s: Ignoring USP record as checking of sender certificate is not supported", __FUNCTION__);
-        return USP_ERR_SECURE_SESS_NOT_SUPPORTED;
+        USP_LOG_Warning("%s: Skipping sender certificate verification", __FUNCTION__);
     }
 
     // Exit if this record contains an End-to-End Session Context (which we don't yet support)
@@ -701,6 +712,8 @@ void CacheControllerRoleForCurMsg(char *endpoint_id, ctrust_role_t role, mtp_pro
 {
     int err;
 
+    cur_msg_controller_info.endpoint_id = endpoint_id;
+
     // Get the combined role for this endpoint_id
     err = DEVICE_CONTROLLER_GetCombinedRoleByEndpointId(endpoint_id, &cur_msg_combined_role);
     if (err != USP_ERR_OK)
@@ -711,23 +724,40 @@ void CacheControllerRoleForCurMsg(char *endpoint_id, ctrust_role_t role, mtp_pro
         return;
     }
 
+
     switch(protocol)
     {
+#ifndef DISABLE_STOMP
         case kMtpProtocol_STOMP:
             // If the message was received over STOMP, then the inherited role will have been saved in DEVICE_CONTROLLER
             // when the STOMP handshake completed and will already equal the role passed with the USP message
             USP_ASSERT(cur_msg_combined_role.inherited == role);
             break;
+#endif
 
 #ifdef ENABLE_COAP
         case kMtpProtocol_CoAP:
-            // If the message was not received over STOMP, then the inherited role won't have been saved in DEVICE_CONTROLLER,
+            // If the message was received over CoAP, then the inherited role won't have been saved in DEVICE_CONTROLLER,
             // so override with the role that was passed with the USP message
             USP_ASSERT(cur_msg_combined_role.inherited == ROLE_DEFAULT);
             cur_msg_combined_role.inherited = role;
             break;
 #endif
 
+#ifdef ENABLE_MQTT
+        case kMtpProtocol_MQTT:
+            USP_ASSERT(cur_msg_combined_role.inherited == role);
+            break;
+#endif
+
+#ifdef ENABLE_WEBSOCKETS
+        case kMtpProtocol_WebSockets:
+            // If the message was received over WebSockets, then the inherited role won't have been saved in DEVICE_CONTROLLER,
+            // so override with the role that was passed with the USP message
+            USP_ASSERT(cur_msg_combined_role.inherited == ROLE_DEFAULT);
+            cur_msg_combined_role.inherited = role;
+            break;
+#endif
         default:
             TERMINATE_BAD_CASE(protocol);
             break;

@@ -3,7 +3,7 @@
 ## Installing and Configuring the OB-USP-Agent
 The test controller is nothing more than the OB-USP-Agent with an added function capable of parsing an input file and creating Controller USP Messages from the input file. OB-USP-Agent functions are invoked for setting up connections, formatting and sending messages. To install and initially configure the test controller, follow the instructions for installing the OB-USP-Agent in QUICK_START_GUIDE.md. This test controller can be run as an Agent, and all command line options (described in QUICK_START_GUIDE.md) are available.
 
-## Setting up the Database 
+## Setting up the Controller's Database 
 Once the code is installed, the database needs to be configured. The database is an Agent database. For the purposes of setting up connections and sending USP Messages, it is important to recognize this test controller thinks of itself as an Agent. The Agent processes being used to establish connections and send messages are completely unaware that they are being invoked for the purpose of sending Controller messages.
 
 The database will need parameters set as described in the following sub-sections. It may be useful to create a script that sets all these parameters using the syntax:
@@ -39,22 +39,43 @@ If you want to disable encryption while testing, that can be done through the ve
 obuspa -c dbset "Device.STOMP.Connection.<instance number>.X_ARRIS-COM_EnableEncryption" "false"
 ```
 
-## CoAP
+### CoAP
 If you will be using CoAP, this controller will need to know its CoAP server port and resource name. Configure the database CoAP parameters. If the LocalAgent.MTP CoAP instance does not exist in the database, you may need to add it, first, using the `obuspa -c dbadd "<object name and instance>"` command. Make sure there is an Alias in the object, if you add a new instance.
 ```
-obuspa -c dbset "Device.LocalAgent.MTP.2.Protocol" "CoAP"
-obuspa -c dbset "Device.LocalAgent.MTP.2.Enable" "true"
-obuspa -c dbset "Device.LocalAgent.MTP.2.CoAP.EnableEncryption" "[true|false]"
-obuspa -c dbset "Device.LocalAgent.MTP.2.CoAP.Interfaces" "<comma delimited list of interface names to run CoAP over>"
-obuspa -c dbset "Device.LocalAgent.MTP.2.CoAP.Path" "<name of CoAP resource -- any word will do, like "Controller">"
-obuspa -c dbset "Device.LocalAgent.MTP.2.CoAP.Port" "5683" // recommend just using the default port of 5683
+obuspa -c dbset "Device.LocalAgent.MTP.<instance number>.Protocol" "CoAP"
+obuspa -c dbset "Device.LocalAgent.MTP.<instance number>.Enable" "true"
+obuspa -c dbset "Device.LocalAgent.MTP.<instance number>.CoAP.EnableEncryption" "[true|false]"
+obuspa -c dbset "Device.LocalAgent.MTP.<instance number>.CoAP.Interfaces" "<comma delimited list of interface names to run CoAP over>"
+obuspa -c dbset "Device.LocalAgent.MTP.<instance number>.CoAP.Path" "<name of CoAP resource -- any word will do, like "Controller">"
+obuspa -c dbset "Device.LocalAgent.MTP.<instance number>.CoAP.Port" "5683" // recommend just using the default port of 5683
 ```
 
-## Configuring Information about Agents
-The test controller needs to know about Agents it will be sending messages to. These Agents need to be in the test controller's Device.LocalAgent.Controller table -- because the test controller thinks it is an Agent and the Endpoints it talks to are Controllers. 
+### MQTT
+If you will be using MQTT, this controller will need to know its MQTT broker. Configure the database MQTT parameters. If the LocalAgent.MTP MQTT instance does not exist in the database, you may need to add it, first, using the `obuspa -c dbadd "<object name and instance>"` command. Make sure there is an Alias in the object, if you add a new instance.
+```
+obuspa -c dbset "Device.MQTT.Client.<instance number>.Enable" "true"
+obuspa -c dbset "Device.MQTT.Client.<instance number>.ProtocolVersion" "[3.1.1|5.0]"
+obuspa -c dbset "Device.MQTT.Client.<instance number>.EnableEncryption" "[true|false]"
+obuspa -c dbset "Device.MQTT.Client.<instance number>.BrokerAddress" "<IP address or FQDN of MQTT broker>"
+obuspa -c dbset "Device.MQTT.Client.<instance number>.BrokerPort" "<port MQTT broker is listening on>"
+obuspa -c dbset "Device.MQTT.Client.<instance number>.TransportProtocol" "[TCP/IP|TLS]"
+obuspa -c dbset "Device.MQTT.Client.<instance number>.ClientID" "<identifier configured for this test controller in the MQTT broker>"
+obuspa -c dbset "Device.MQTT.Client.<instance number>.Username" "<username configured for this test controller in the MQTT broker>"
+obuspa -c dbset "Device.MQTT.Client.<instance number>.Password" "<the password configured in the MQTT broker>"
+
+obuspa -c dbset "Device.LocalAgent.MTP.<instance number>.Enable" "true"
+obuspa -c dbset "Device.LocalAgent.MTP.<instance number>.Protocol" "MQTT"
+obuspa -c dbset "Device.LocalAgent.MTP.<instance number>.MQTT.Reference" "Device.MQTT.Client.<instance number>" // The value MUST be the Path Name of a row in the MQTT.Client table
+obuspa -c dbset "Device.LocalAgent.MTP.<instance number>.MQTT.ResponseTopicConfigured" "<The configured 'reply to' topic>"
+```
+
+### Configuring Information about Agents
+The test controller needs to know about Agents it will be sending messages to. These Agents need to be in the test controller's Device.LocalAgent.Controller table -- because the test controller thinks it is an Agent and the Endpoints it talks to are Controllers.
+
 For general configuration, an instance is needed in the Controller table with Alias, EndpointID and Enabled. If you need to add an instance, use `obuspa -c dbadd "<object name and instance>"` command. Make sure there is an Alias in the object, if you add a new instance. You can use an `obuspa -c dbset "Device.LocalAgent.Controller.<instance>.Alias" "<alias name>"` command to set the Alias.
 
 ```
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.Alias" "<Agent Alias>"
 obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.EndpointID" "<Agent Endpoint ID>"
 obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.Enable" "true"
 ```
@@ -67,12 +88,20 @@ obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance nu
 
 For the CoAP parameters, you may need to add an MTP instance, with Alias. And then set:
 ```
-obuspa -c dbset "Device.LocalAgent.Controller.1.MTP.2.Protocol" "CoAP"
-obuspa -c dbset "Device.LocalAgent.Controller.1.MTP.2.CoAP.EnableEncryption" "false" // if certs aren't set up
-obuspa -c dbset "Device.LocalAgent.Controller.1.MTP.2.CoAP.Host" "<IP address or FQDN of Agent>"
-obuspa -c dbset "Device.LocalAgent.Controller.1.MTP.2.CoAP.Path" "<name of CoAP resource -- any word will do, like "Agent">"
-obuspa -c dbset "Device.LocalAgent.Controller.1.MTP.2.CoAP.Port" "5683" // recommend using default port of 5683
-obuspa -c dbset "Device.LocalAgent.Controller.1.MTP.2.Enable" "true"
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.Protocol" "CoAP"
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.CoAP.EnableEncryption" "false" // if certs aren't set up
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.CoAP.Host" "<IP address or FQDN of Agent>"
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.CoAP.Path" "<name of CoAP resource -- any word will do, like "Agent">"
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.CoAP.Port" "5683" // recommend using default port of 5683
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.Enable" "true"
+```
+
+For the MQTT parameters, you may need to add an MTP instance, with Alias. And then set:
+```
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.Enable" "true"
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.Protocol" "MQTT"
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.MQTT.Reference" "Device.MQTT.Client.<instance number>" // The value MUST be the Path Name of a row in the MQTT.Client table
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.MQTT.Topic" "<topic name>"
 ```
 
 ## Setting up Agents to Work with this Controller
@@ -81,9 +110,12 @@ Once you know the Endpoint ID and connectivity information of this Controller, y
 For general configuration, an instance is needed in the Controller table with Alias, EndpointID and Enabled. If you need to add an instance, use `obuspa -c dbadd "<object name and instance>"` command. Make sure there is an Alias in the object, if you add a new instance. You can use an `obuspa -c dbset "Device.LocalAgent.Controller.<instance>.Alias" "<alias name>"` command to set the Alias.
 
 ```
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.Alias" "<test controller Alias>"
 obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.EndpointID" "<test controller Endpoint ID>"
 obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.Enable" "true"
 ```
+
+And remember that the Agent needs its MTPs set up. Make sure whatever value you told the test controller for an Agent's STOMP destination, CoAP resource or MQTT client is set identically in the Agent's Device.LocalAgent.MTP instance.
 
 For the STOMP parameters, you may need to add an MTP instance, with Alias. And then set:
 ```
@@ -93,22 +125,30 @@ obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance nu
 
 For the CoAP parameters, you may need to add an MTP instance, with Alias. And then set:
 ```
-obuspa -c dbset "Device.LocalAgent.Controller.1.MTP.2.Protocol" "CoAP"
-obuspa -c dbset "Device.LocalAgent.Controller.1.MTP.2.CoAP.EnableEncryption" "false" // if certs aren't set up
-obuspa -c dbset "Device.LocalAgent.Controller.1.MTP.2.CoAP.Host" "<IP address or FQDN of test controller>"
-obuspa -c dbset "Device.LocalAgent.Controller.1.MTP.2.CoAP.Path" "<name of CoAP resource -- the same word you gave the test controller>"
-obuspa -c dbset "Device.LocalAgent.Controller.1.MTP.2.CoAP.Port" "5683" // recommend using default port of 5683
-obuspa -c dbset "Device.LocalAgent.Controller.1.MTP.2.Enable" "true"
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.Protocol" "CoAP"
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.CoAP.EnableEncryption" "false" // if certs aren't set up
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.CoAP.Host" "<IP address or FQDN of test controller>"
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.CoAP.Path" "<name of CoAP resource -- the same word you gave the test controller>"
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.CoAP.Port" "5683" // recommend using default port of 5683
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.Enable" "true"
 ```
 
-And remember that the Agent needs its MTPs set up. Make sure whatever value you told the test controller for an Agent's STOMP destination or CoAP resource is set identically in the Agent's Device.LocalAgent.MTP instance.
+For the MQTT parameters, you may need to add a Device.MQTT.Client instance and then an MTP instance, both with Alias. And then set:
+```
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.Enable" "true"
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.Protocol" "MQTT"
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.MQTT.Reference" "Device.MQTT.Client.<instance number>" // The value MUST be the Path Name of a row in the MQTT.Client table
+obuspa -c dbset "Device.LocalAgent.Controller.<instance number>.MTP.<instance number>.MQTT.Topic" "<topic name>"
+```
+and remember to set the appropriate Agent's MQTT Topic.
 
-## Controller Test File
+
+## Running the Test Controller with a test file
 
 See the CTRL_FILE_RULES.md and example files for creating your own test files.
 
-## Running the Test Controller
-
 First start the Agent. You can use `obuspa -p -v 4` to run the Agent. You may want to redirect its output into a file.
 
-To run the test controller, you can use `obuspa -p -v 4 -x <test file name>`. Note that the Agent replies are only seen in the Agent output, unless you use a packet capture tool, like Wireshark, to see them at the controller.
+To run the test controller, you can use `obuspa -p -v 4 -x <test file name>`.
+
+>Note that the Agent replies are only seen in the Agent output. It is also possible to use a packet capture tool, like Wireshark, to see them. At that moment, the Test Controller does not output the received USP messages.

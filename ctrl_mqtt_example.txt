@@ -1,0 +1,11 @@
+# Example for MQTT exchanges
+
+# This is the first line
+msg_id:"1" to_id:"proto::Agent1" mqtt_topic:"/usp/endpoint/1" mqtt_instance:"1"
+
+# Those are the messages to be sent
+#msg_type:"GetSupportedDM" obj_paths:"Device." first_level_only:"false" return_commands:"true" return_events:"true" return_params:"true"
+msg_type:"GetSupportedProtocol" controller_supported_protocol_versions:"1.0"
+#msg_type:GetInstances obj_paths:"Device.LocalAgent.MTP." first_level_only:"false"
+#msg_type:"Get" param_paths:"Device.LocalAgent.MTP.*." param_paths:"Device.LocalAgent.Controller.*." param_paths:"Device.LocalAgent." param_paths:"Device.LocalAgent.MTP.1." param_paths:"Device.LocalAgent.MTP.*."
+msg_type:"Operate" command:"Device.Reboot()" command_key:"boot123" send_resp:"true"

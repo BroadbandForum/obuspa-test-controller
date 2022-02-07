@@ -1,33 +1,33 @@
 /*
  *
- * Copyright (C) 2019, Broadband Forum
- * Copyright (C) 2016-2019  CommScope, Inc
- * 
+ * Copyright (C) 2019-2021, Broadband Forum
+ * Copyright (C) 2016-2021  CommScope, Inc
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
- * 
+ *
  * 1. Redistributions of source code must retain the above copyright
  *    notice, this list of conditions and the following disclaimer.
- * 
+ *
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 
+ *
  * 3. Neither the name of the copyright holder nor the names of its
  *    contributors may be used to endorse or promote products derived from
  *    this software without specific prior written permission.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
  * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR 
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF 
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
  * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
  * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF 
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
  * THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
@@ -66,13 +66,13 @@ typedef enum
 //------------------------------------------------------------------------------------
 // API
 void USP_LOG_Init(void);
-int USP_LOG_SetFile(char *file);
+int USP_LOG_SetFile(const char *file);
 void USP_LOG_Callstack(void);
-void USP_LOG_HexBuffer(char *title, unsigned char *buf, int len);
+void USP_LOG_HexBuffer(const char *title, const unsigned char *buf, int len);
 void USP_LOG_String(log_type_t log_type, char *str);
-void USP_LOG_Printf(log_type_t log_type, char *fmt, ...) __attribute__((format(printf, 2, 3)));
-void USP_LOG_Puts(log_type_t log_type, char *str);
-void USP_LOG_ErrorSSL(const char *func_name, char *failure_string, int ret, int err);
+void USP_LOG_Printf(log_type_t log_type, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+void USP_LOG_Puts(log_type_t log_type, const char *str);
+void USP_LOG_ErrorSSL(const char *func_name, const char *failure_string, int ret, int err);
 
 //------------------------------------------------------------------------------------
 // Macros used for normal debug logging
@@ -91,5 +91,6 @@ extern bool enable_callstack_debug;
 // Macro used to print out STOMP frames
 #define USP_PROTOCOL(...)   USP_LOG_Printf(kLogType_Protocol, __VA_ARGS__)
 
-
+// Maximum number of characters in a single log statement
+#define USP_LOG_MAXLEN  (10*1024)
 #endif

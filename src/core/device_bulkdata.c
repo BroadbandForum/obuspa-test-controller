@@ -1,33 +1,33 @@
 /*
  *
- * Copyright (C) 2019, Broadband Forum
- * Copyright (C) 2017-2019  CommScope, Inc
- * 
+ * Copyright (C) 2019-2021, Broadband Forum
+ * Copyright (C) 2017-2021  CommScope, Inc
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
- * 
+ *
  * 1. Redistributions of source code must retain the above copyright
  *    notice, this list of conditions and the following disclaimer.
- * 
+ *
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 
+ *
  * 3. Neither the name of the copyright holder nor the names of its
  *    contributors may be used to endorse or promote products derived from
  *    this software without specific prior written permission.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
  * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR 
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF 
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
  * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
  * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF 
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
  * THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
@@ -57,6 +57,8 @@
 #include "text_utils.h"
 #include "retry_wait.h"
 #include "bdc_exec.h"
+#include "dm_exec.h"
+#include "group_get_vector.h"
 
 //------------------------------------------------------------------------------
 // String versions of defines in vendor_defs.h
@@ -65,7 +67,6 @@
 
 //------------------------------------------------------------------------------
 // Definitions for formats that we support
-#define BULKDATA_PROTOCOL "HTTP"
 #define BULKDATA_ENCODING_TYPE "JSON"
 #define BULKDATA_JSON_REPORT_FORMAT "NameValuePair"
 
@@ -116,6 +117,36 @@ typedef struct
 static bulkdata_profile_t bulkdata_profiles[BULKDATA_MAX_PROFILES];
 
 //---------------------------------------------------------------------------------------------
+// Bulk Data Collection Protocol
+#define BULKDATA_PROTOCOL_HTTP "HTTP"
+#define BULKDATA_PROTOCOL_USP_EVENT "USPEventNotif"
+
+typedef enum
+{
+    kBdcProtocol_HTTP,
+    kBdcProtocol_UspEvent,
+
+    kBdcProtocol_Max               // This should always be the last value in this enumeration. It is used to statically size arrays based on one entry for each active enumeration
+} bdc_protocol_t;
+
+// Array to convert from string to enumeration, and vice-versa
+const enum_entry_t bdc_protocols[kBdcProtocol_Max] =
+{
+    { kBdcProtocol_HTTP,               BULKDATA_PROTOCOL_HTTP },       // This is the default value for notification type
+    { kBdcProtocol_UspEvent,           BULKDATA_PROTOCOL_USP_EVENT },
+};
+
+//---------------------------------------------------------------------------------------------
+// Profile Push Event
+#define BULKDATA_PROFILE_PUSH_EVENT "Device.BulkData.Profile.{i}.Push!"
+
+// Array of arguments sent in Push! event
+static char *profile_push_event_args[] =
+{
+    "Data",
+};
+
+//---------------------------------------------------------------------------------------------
 // Structure containing retrieved controlling parameters for a specific profile
 // String sizes are taken from TR-181
 typedef struct
@@ -149,6 +180,23 @@ default_uri_query_params_t default_uri_query_params[] =
     { "Device.DeviceInfo.SerialNumber", "sn"},
 };
 
+//-------------------------------------------------------------------------
+// Structure used to store the info read from Device.BulkData.Profile.{i}.Parameter,
+// and marshall the data from the get group vector
+typedef struct
+{
+    char *path_expr;        // Path expression stored in Device.BulkData.Profile.{i}.Parameter.{i}.Reference
+    char *alt_name;         // Alt name stored in Device.BulkData.Profile.{i}.Parameter.{i}.Name
+    int index;              // start index of parameters in get group vector for this path expression
+    int num_entries;        // number of entries in the get group vector for this path expression
+} param_ref_entry_t;
+
+typedef struct
+{
+    param_ref_entry_t *vector;
+    int num_entries;
+} param_ref_vector_t;
+
 //------------------------------------------------------------------------------
 // Forward declarations. Note these are not static, because we need them in the symbol table for USP_LOG_Callstack() to show them
 int Validate_AddBulkDataProfile(dm_req_t *req);
@@ -179,15 +227,15 @@ int ProcessBulkDataProfileAdded(int instance);
 void ProcessBulkDataProfileDeleted(bulkdata_profile_t *bp);
 int bulkdata_stop_profile(bulkdata_profile_t *bp);
 void bulkdata_process_profile(int id);
-void bulkdata_process_profile_work(bulkdata_profile_t *bp);
+void bulkdata_process_profile_http(bulkdata_profile_t *bp);
+void bulkdata_process_profile_usp_event(bulkdata_profile_t *bp);
 bulkdata_profile_t *bulkdata_find_free_profile(void);
 bulkdata_profile_t *bulkdata_find_profile(int profile_id);
 int bulkdata_calc_report_map(bulkdata_profile_t *bp, kv_vector_t *report_map);
-int bulkdata_append_to_result_map(char *origin_path, char *alt_name, kv_vector_t *param_values, kv_vector_t *report_map);
 int bulkdata_reduce_to_alt_name(char *spec, char *path, char *alt_name, char *out_buf, int buf_len);
-char *bulkdata_generate_json_report(bulkdata_profile_t *bp, profile_ctrl_params_t *ctrl);
+char *bulkdata_generate_json_report(bulkdata_profile_t *bp, char *report_timestamp);
 unsigned char *bulkdata_compress_report(profile_ctrl_params_t *ctrl, char *input_buf, int input_len, int *p_output_len);
-int bulkdata_schedule_sending_report(profile_ctrl_params_t *ctrl, bulkdata_profile_t *bp, unsigned char *json_report, int report_len);
+int bulkdata_schedule_sending_http_report(profile_ctrl_params_t *ctrl, bulkdata_profile_t *bp, unsigned char *json_report, int report_len);
 int bulkdata_start_profile(bulkdata_profile_t *bp);
 int bulkdata_resync_profile(bulkdata_profile_t *bp, int *delta_time);
 unsigned bulkdata_calc_waittime_to_next_send(bulkdata_profile_t *bp);
@@ -197,6 +245,9 @@ void bulkdata_drop_oldest_retained_reports(bulkdata_profile_t *bp, int num_repor
 int bulkdata_platform_get_uri_query_name_map(int profile_id, kv_vector_t *name_map);
 int bulkdata_platform_calc_uri_query_escaped_map(kv_vector_t *name_map, kv_vector_t *escaped_map);
 char *bulkdata_platform_calc_uri_query_string(kv_vector_t *escaped_map);
+int bulkdata_platform_get_param_refs(int profile_id, param_ref_vector_t *param_refs);
+void bulkdata_expand_param_ref(param_ref_entry_t *pr, group_get_vector_t *ggv);
+void bulkdata_append_to_result_map(param_ref_entry_t *pr, group_get_vector_t *ggv, kv_vector_t *report_map);
 
 /*********************************************************************//**
 **
@@ -228,7 +279,7 @@ int DEVICE_BULKDATA_Init(void)
     err = USP_REGISTER_DBParam_ReadWrite("Device.BulkData.Enable", "false", NULL, NotifyChange_BulkDataGlobalEnable, DM_BOOL);
     err |= USP_REGISTER_VendorParam_ReadOnly("Device.BulkData.Status", Get_BulkDataGlobalStatus, DM_STRING);
     err |= USP_REGISTER_Param_Constant("Device.BulkData.MinReportingInterval", BULKDATA_MINIMUM_REPORTING_INTERVAL_STR, DM_UINT);
-    err |= USP_REGISTER_Param_Constant("Device.BulkData.Protocols", BULKDATA_PROTOCOL, DM_STRING);
+    err |= USP_REGISTER_Param_SupportedList("Device.BulkData.Protocols", bdc_protocols, NUM_ELEM(bdc_protocols));
     err |= USP_REGISTER_Param_Constant("Device.BulkData.EncodingTypes", BULKDATA_ENCODING_TYPE, DM_STRING);
     err |= USP_REGISTER_Param_Constant("Device.BulkData.ParameterWildCardSupported", "true", DM_BOOL);
     err |= USP_REGISTER_Param_Constant("Device.BulkData.MaxNumberOfProfiles", BULKDATA_MAX_PROFILES_STR, DM_INT);
@@ -243,7 +294,7 @@ int DEVICE_BULKDATA_Init(void)
     err |= USP_REGISTER_VendorParam_ReadOnly("Device.BulkData.Profile.{i}.X_ARRIS-COM_Status", Get_BulkDataProfileStatus, DM_STRING);
     err |= USP_REGISTER_DBParam_ReadWrite("Device.BulkData.Profile.{i}.Name", "", NULL, NULL, DM_STRING);
     err |= USP_REGISTER_DBParam_ReadWrite("Device.BulkData.Profile.{i}.NumberOfRetainedFailedReports", "0", Validate_NumberOfRetainedFailedReports, NULL, DM_INT);
-    err |= USP_REGISTER_DBParam_ReadWrite("Device.BulkData.Profile.{i}.Protocol", BULKDATA_PROTOCOL, Validate_BulkDataProtocol, NULL, DM_STRING);
+    err |= USP_REGISTER_DBParam_ReadWrite("Device.BulkData.Profile.{i}.Protocol", BULKDATA_PROTOCOL_HTTP, Validate_BulkDataProtocol, NULL, DM_STRING);
     err |= USP_REGISTER_DBParam_ReadWrite("Device.BulkData.Profile.{i}.EncodingType", BULKDATA_ENCODING_TYPE, Validate_BulkDataEncodingType, NULL, DM_STRING);
     err |= USP_REGISTER_DBParam_ReadWrite("Device.BulkData.Profile.{i}.ReportingInterval", "86400", Validate_BulkDataReportingInterval, NotifyChange_BulkDataReportingInterval, DM_UINT);
     err |= USP_REGISTER_DBParam_ReadWrite("Device.BulkData.Profile.{i}.TimeReference", UNKNOWN_TIME_STR, NULL, NotifyChange_BulkDataTimeReference, DM_DATETIME);
@@ -278,6 +329,10 @@ int DEVICE_BULKDATA_Init(void)
     err |= USP_REGISTER_Param_NumEntries("Device.BulkData.Profile.{i}.HTTP.RequestURIParameterNumberOfEntries", "Device.BulkData.Profile.{i}.HTTP.RequestURIParameter.{i}");
     err |= USP_REGISTER_DBParam_ReadWrite("Device.BulkData.Profile.{i}.HTTP.RequestURIParameter.{i}.Name", "", NULL, NULL, DM_STRING);
     err |= USP_REGISTER_DBParam_ReadWrite("Device.BulkData.Profile.{i}.HTTP.RequestURIParameter.{i}.Reference", "", Validate_BulkDataReference, NULL, DM_STRING);
+
+    // Register Push! Event
+    err |= USP_REGISTER_Event(BULKDATA_PROFILE_PUSH_EVENT);
+    err |= USP_REGISTER_EventArguments(BULKDATA_PROFILE_PUSH_EVENT, profile_push_event_args, NUM_ELEM(profile_push_event_args));
 
 
     // Exit if any errors occurred
@@ -318,10 +373,11 @@ int DEVICE_BULKDATA_Start(void)
     }
 
     // Exit if unable to get the object instance numbers present in the profile table
+    INT_VECTOR_Init(&iv);
     err = DATA_MODEL_GetInstances(device_bulkdata_profile_root, &iv);
     if (err != USP_ERR_OK)
     {
-        return err;
+        goto exit;
     }
 
     // Add all profiles to the bulkdata_profiles array
@@ -343,7 +399,7 @@ int DEVICE_BULKDATA_Start(void)
     }
 
     err = USP_ERR_OK;
-    
+
 exit:
     INT_VECTOR_Destroy(&iv);
     return err;
@@ -403,11 +459,12 @@ void DEVICE_BULKDATA_NotifyTransferResult(int profile_id, bdc_transfer_result_t 
     {
         return;
     }
-    
+
     if (transfer_result == kBDCTransferResult_Success)
     {
         // Report(s) have been successfully sent, so don't retain them
         bulkdata_clear_retained_reports(bp);
+        bp->is_working = true;
     }
     else
     {
@@ -417,6 +474,7 @@ void DEVICE_BULKDATA_NotifyTransferResult(int profile_id, bdc_transfer_result_t 
             // Report(s) have not been sent successfully, so start the retry mechanism (or increment the retry_count, if it is already in progress)
             bp->retry_count++;
         }
+        bp->is_working = false;
     }
 
 
@@ -504,11 +562,13 @@ int Validate_NumberOfRetainedFailedReports(dm_req_t *req, char *value)
 **************************************************************************/
 int Validate_BulkDataProtocol(dm_req_t *req, char *value)
 {
-    // Exit if trying to set a value outside of the range we accept
-    if (strcmp(value, BULKDATA_PROTOCOL) != 0)
+    int err;
+    bdc_protocol_t protocol;
+
+    err = DM_ACCESS_GetEnum(req->path, &protocol, bdc_protocols, NUM_ELEM(bdc_protocols));
+    if (err != USP_ERR_OK)
     {
-        USP_ERR_SetMessage("%s: Only Protocol supported is '%s'", __FUNCTION__, BULKDATA_PROTOCOL);
-        return USP_ERR_INVALID_VALUE;
+        return err;
     }
 
     return USP_ERR_OK;
@@ -577,7 +637,7 @@ int Validate_BulkDataReference(dm_req_t *req, char *value)
     // NOTE: The resolved paths are validated against the current controller's role.
     // So even if a partial path is specified here, it will fail to validate if permissions do not allow it
     MSG_HANDLER_GetMsgRole(&combined_role);
-    err = PATH_RESOLVER_ResolveDevicePath(value, NULL, kResolveOp_GetBulkData, NULL, &combined_role, 0);
+    err = PATH_RESOLVER_ResolveDevicePath(value, NULL, NULL, kResolveOp_GetBulkData, NULL, &combined_role, 0);
     if (err != USP_ERR_OK)
     {
         return err;
@@ -738,7 +798,7 @@ int NotifyChange_BulkDataGlobalEnable(dm_req_t *req, char *value)
     int err;
     bulkdata_profile_t *bp;
 
-    // Exit if value has not changed    
+    // Exit if value has not changed
     if (val_bool == global_enable)
     {
         return USP_ERR_OK;
@@ -1016,7 +1076,7 @@ int Notify_BulkDataProfileAdded(dm_req_t *req)
     int err;
 
     err = ProcessBulkDataProfileAdded(inst1);
-    
+
     // NOTE: If an error occurred adding the profile to the bulkdata_profiles[], then
     // this is OK. The code will report the profile's status as 'Error'
 
@@ -1043,7 +1103,7 @@ int Notify_BulkDataProfileDeleted(dm_req_t *req)
     {
         ProcessBulkDataProfileDeleted(bp);
     }
-    
+
     return USP_ERR_OK;
 }
 
@@ -1073,7 +1133,7 @@ int Get_BulkDataGlobalStatus(dm_req_t *req, char *buf, int len)
         USP_STRNCPY(buf, "Disabled", len);
         return USP_ERR_OK;
     }
-    
+
     // Exit if unable to determine the number of instances in the bulk data profile table
     err = DATA_MODEL_GetNumInstances("Device.BulkData.Profile.", &num_instances);
     if (err != USP_ERR_OK)
@@ -1143,7 +1203,7 @@ int Get_BulkDataProfileStatus(dm_req_t *req, char *buf, int len)
         // Cope with case of profile existing, but not having an entry in the bulkdata_profile array
         // This could occur if ProcessBulkDataProfileAdded() failed
         status = "Error";
-        goto exit;   
+        goto exit;
     }
 
     // Determine the status of the profile
@@ -1292,7 +1352,7 @@ void ProcessBulkDataProfileDeleted(bulkdata_profile_t *bp)
 **  bulkdata_platform_get_uri_query_params
 **
 **  Returns a (dynamically allocated) string containing the URI query parameters to append to the URL
-**  
+**
 ** \param   profile_id - Instance number of profile in Device.Bulkdata.Profile.{i}
 **
 ** \return  dynamically allocated string containing the URI query parameters or NULL if an error occurred
@@ -1340,7 +1400,7 @@ exit:
 **
 **  Returns a map containing the short names of all URI query parameters (path vs short name)
 **  NOTE: This function also adds the default query parameters to the map
-**  
+**
 ** \param   profile_id - Instance number of profile in Device.Bulkdata.Profile.{i}
 ** \param   name_map - initialised map structure in which to return the map of all URI query parameters for the specified profile
 **
@@ -1422,7 +1482,7 @@ exit:
 **
 **  Returns a map containing the {short_name, value} of all URI query parameters
 **  NOTE: The key and value are the URL escaped versions
-**  
+**
 ** \param   name_map - input map containing the path and short name to use for all parameters
 ** \param   escaped_map - map in which to return escaped short name and escaped value of all URI query parameters
 **
@@ -1450,35 +1510,35 @@ int bulkdata_platform_calc_uri_query_escaped_map(kv_vector_t *name_map, kv_vecto
     }
 
     // Iterate over all parameters to get
+    // NOTE: If any failure occurs, then just skip that parameter from the URI query parameters
     for (i=0; i < name_map->num_entries; i++)
     {
         kv = &name_map->vector[i];
         path = kv->key;
         short_name = kv->value;
 
-        // Exit if unable to get the value of the parameter
+        // Skip if unable to get the value of the parameter
         err = DATA_MODEL_GetParameterValue(path, value, sizeof(value), 0);
         if (err != USP_ERR_OK)
         {
-            goto exit;
+            continue;
         }
 
         // Escape the value string
         escaped_value = curl_easy_escape(handle, value, 0);
         if (escaped_value == NULL)
         {
-            USP_LOG_Error("%s: curl_easy_escape failed", __FUNCTION__);
-            err = USP_ERR_INTERNAL_ERROR;
-            goto exit;
+            USP_LOG_Warning("%s: curl_easy_escape failed for '%s'. Not including %s in BDC URI query params", __FUNCTION__, value, path);
+            continue;
         }
 
         // Escape the short name string
         escaped_name = curl_easy_escape(handle, short_name, 0);
         if (escaped_name == NULL)
         {
-            USP_LOG_Error("%s: curl_easy_escape failed", __FUNCTION__);
-            err = USP_ERR_INTERNAL_ERROR;
-            goto exit;
+            curl_free(escaped_value);
+            USP_LOG_Warning("%s: curl_easy_escape failed for '%s'. Not including %s in BDC URI query params", __FUNCTION__, short_name, path);
+            continue;
         }
 
         // Add the escaped strings to the output map
@@ -1486,30 +1546,11 @@ int bulkdata_platform_calc_uri_query_escaped_map(kv_vector_t *name_map, kv_vecto
 
         // Tidy up
         curl_free(escaped_value);
-        escaped_value = NULL;
-        curl_free(escaped_name);
-        escaped_name = NULL;
-    }
-
-    err = USP_ERR_OK;
-
-exit:
-    if (escaped_value != NULL)
-    {
-        curl_free(escaped_value);
-    }
-
-    if (escaped_name != NULL)
-    {
         curl_free(escaped_name);
     }
 
-    if (handle != NULL)
-    {
-        curl_easy_cleanup(handle);
-    }
-
-    return err;
+    curl_easy_cleanup(handle);
+    return USP_ERR_OK;;
 }
 
 /*********************************************************************//**
@@ -1517,7 +1558,7 @@ exit:
 **  bulkdata_platform_calc_uri_query_string
 **
 **  Returns a dynamically allocated string of the form "Name1=Value1&Name2=Value2"
-**  
+**
 ** \param   escaped_map - pointer to structure containing the input map of {Name, Value}
 **
 ** \return  Pointer to dynamically allocated string containing the URI query parameters
@@ -1583,18 +1624,84 @@ char *bulkdata_platform_calc_uri_query_string(kv_vector_t *escaped_map)
 
 /*********************************************************************//**
 **
-** bulkdata_platform_get_parameter_paths
+**  bulkdata_calc_report_map
 **
-** Obtains the parameter references vs alternative names for a given profile instance.
-** This is a map of the parameters to report on in a profile (key=path_expr, value=alt_name)
+**  Calculates the map containing {parameter name vs type/value} for the specified profile
 **
-** \param   profile_id - Instance number of profile in Device.Bulkdata.Profile.{i}
-** \param   param_refs = map of Device.BulkData.Profile.{i}.Parameter.{i} (key=path_expr, value=alt_name)
+** \param   context - pointer to global bulkdata context
+** \param   bp - pointer to bulk data profile to get the report map for
+** \param   report_map - initialised map in which to return the report map
 **
 ** \return  USP_ERR_OK if successful
 **
 **************************************************************************/
-int bulkdata_platform_get_parameter_paths(int profile_id, kv_vector_t *param_refs)
+int bulkdata_calc_report_map(bulkdata_profile_t *bp, kv_vector_t *report_map)
+{
+    int err;
+    int i;
+    param_ref_vector_t  param_refs;    // Vector containing info about each Device.BulkData.Profile.{i}.Parameter entry
+    param_ref_entry_t *pr;
+    group_get_vector_t ggv;
+
+    // Get the paths and alternative names of all parameter references that are to be posted from this profile
+    memset(&param_refs, 0, sizeof(param_refs));
+    err = bulkdata_platform_get_param_refs(bp->profile_id, &param_refs);
+    if (err != USP_ERR_OK)
+    {
+        USP_ERR_SetMessage("%s: bulkdata_platform_get_param_refs() failed", __FUNCTION__);
+        return err;
+    }
+
+    // Exit if no parameter references were found
+    if (param_refs.num_entries == 0)
+    {
+        return USP_ERR_OK;
+    }
+
+    // Expand the parameter references into the set of parameters which they reference
+    GROUP_GET_VECTOR_Init(&ggv);
+    for (i=0; i < param_refs.num_entries; i++)
+    {
+        bulkdata_expand_param_ref(&param_refs.vector[i], &ggv);
+    }
+
+    // Get all parameters
+    GROUP_GET_VECTOR_GetValues(&ggv);
+
+    // Iterate over all param references, adding them to the report map
+    for (i=0; i < param_refs.num_entries; i++)
+    {
+        bulkdata_append_to_result_map(&param_refs.vector[i], &ggv, report_map);
+    }
+
+    GROUP_GET_VECTOR_Destroy(&ggv);
+
+    // Clean up param_refs
+    for (i=0; i < param_refs.num_entries; i++)
+    {
+        pr = &param_refs.vector[i];
+        USP_FREE(pr->path_expr);
+        USP_SAFE_FREE(pr->alt_name);
+    }
+    USP_FREE(param_refs.vector);
+
+    return USP_ERR_OK;
+}
+
+/*********************************************************************//**
+**
+** bulkdata_platform_get_param_refs
+**
+** Obtains all parameter references vs alternative names for a given profile instance.
+** This is a map of the parameters to report on in a profile (key=path_expr, value=alt_name)
+**
+** \param   profile_id - Instance number of profile in Device.Bulkdata.Profile.{i}
+** \param   param_refs = vector in which to return the param refs that have been read from the USP database
+**
+** \return  USP_ERR_OK if successful
+**
+**************************************************************************/
+int bulkdata_platform_get_param_refs(int profile_id, param_ref_vector_t *param_refs)
 {
     int i;
     char path[MAX_DM_PATH];
@@ -1603,9 +1710,13 @@ int bulkdata_platform_get_parameter_paths(int profile_id, kv_vector_t *param_ref
     int instance;
     char reference[MAX_DM_PATH];
     char alt_name[MAX_DM_SHORT_VALUE_LEN];
+    param_ref_entry_t *pr;
+    int size;
+
+    // Initialize defaults for vectors (so that exit can destroy them safely)
+    INT_VECTOR_Init(&iv);
 
     // Exit if unable to obtain the instance numbers of the profile's parameter table
-    INT_VECTOR_Init(&iv);
     USP_SNPRINTF(path, sizeof(path), "Device.BulkData.Profile.%d.Parameter.", profile_id);
     err = DATA_MODEL_GetInstances(path, &iv);
     if (err != USP_ERR_OK)
@@ -1613,7 +1724,19 @@ int bulkdata_platform_get_parameter_paths(int profile_id, kv_vector_t *param_ref
         goto exit;
     }
 
-    // Iterate over all parameters in the table, getting their path expression vs alt_name
+    // Exit if no instances were found
+    if (iv.num_entries == 0)
+    {
+        goto exit;      // NOTE: err will be set to USP_ERR_OK if the code got here
+    }
+
+    // Allocate vector to store marshalling info for all param refs
+    param_refs->num_entries = iv.num_entries;
+    size = iv.num_entries*sizeof(param_ref_entry_t);
+    param_refs->vector = USP_MALLOC(size);
+    memset(param_refs->vector, 0, size);
+
+    // Iterate over all entries in the Profile.{i}.Parameter table, getting their path expression vs alt_name
     for (i=0; i < iv.num_entries; i++)
     {
         // Exit if unable to obtain the parameter reference
@@ -1633,86 +1756,141 @@ int bulkdata_platform_get_parameter_paths(int profile_id, kv_vector_t *param_ref
             goto exit;
         }
 
-        // Add the parameter reference and alt-name to map
-        KV_VECTOR_Add(param_refs, reference, alt_name);
+        // Add the parameter reference and alt-name to param ref info
+        pr = &param_refs->vector[i];
+        pr->path_expr = USP_STRDUP(reference);
+        pr->alt_name = USP_STRDUP(alt_name);
     }
-    
+
     err = USP_ERR_OK;
 
 exit:
     INT_VECTOR_Destroy(&iv);
+
+    if (err != USP_ERR_OK)
+    {
+        USP_SAFE_FREE(param_refs->vector);
+        param_refs->vector = NULL;
+        param_refs->num_entries = 0;
+    }
     return err;
 }
 
 /*********************************************************************//**
 **
-** bulkdata_platform_get_parameter_values
+** bulkdata_expand_param_ref
 **
-** Obtains the values of all parameters given in the path expression
-** This is a map of (key=param_path, value=param_value)
+** Expands the specified parameter reference, storing all the parameters it refrences into the get group vector
 **
-** \param   path_expr - Path expression describing parameters to obtain the values of
-**                      (from Device.BulkData.Profile.{i}.Parameter.{i}.Reference)
-*  \param   param_refs = map containing the resolved list of parameters and their values
+** \param   pr - pointer to parameter reference to expand
+** \param   ggv - pointer to vector to add params found in this path expression to
 **
-** \return  USP_ERR_OK if successful
+** \return  None
 **
 **************************************************************************/
-int bulkdata_platform_get_parameter_values(char *path, kv_vector_t *param_values)
+void bulkdata_expand_param_ref(param_ref_entry_t *pr, group_get_vector_t *ggv)
 {
-    int i;
     int err;
     str_vector_t params;
-    char value[MAX_DM_VALUE_LEN];
-    char *cur_path;
+    int_vector_t group_ids;
     combined_role_t combined_role;
 
     STR_VECTOR_Init(&params);
-    KV_VECTOR_Init(param_values);
+    INT_VECTOR_Init(&group_ids);
 
     // Exit if unable to get the resolved paths
     // NOTE: We can safely use the FullAccess role here, because we have already validated the path expression against the controller's role
     combined_role.inherited = kCTrustRole_FullAccess;
     combined_role.assigned = kCTrustRole_FullAccess;
-    err = PATH_RESOLVER_ResolveDevicePath(path, &params, kResolveOp_GetBulkData, NULL, &combined_role, 0);
+    err = PATH_RESOLVER_ResolveDevicePath(pr->path_expr, &params, &group_ids, kResolveOp_GetBulkData, NULL, &combined_role, 0);
     if (err != USP_ERR_OK)
     {
-        goto exit;
+        STR_VECTOR_Destroy(&params);
+        INT_VECTOR_Destroy(&group_ids);
+        return;
     }
 
-    // Iterate over all parameter paths found
-    for (i=0; i<params.num_entries; i++)
+    // Save the range of indexes for this path expression
+    pr->index = ggv->num_entries;
+    pr->num_entries = params.num_entries;
+
+    // Exit if no params were found
+    if (params.num_entries == 0)
     {
-        // Exit if unable to get the value of the parameter
-        cur_path = params.vector[i];
-        err = DATA_MODEL_GetParameterValue(cur_path, value, sizeof(value), 0);
-        if (err != USP_ERR_OK)
+        STR_VECTOR_Destroy(&params);
+        INT_VECTOR_Destroy(&group_ids);
+        return;
+    }
+
+    // Expand the get group vector to contain the extra parameter requests
+    // NOTE: Ownership of the strings in the params vector transfers to the group get vector
+    GROUP_GET_VECTOR_AddParams(ggv, &params, &group_ids);
+
+    // Clean up
+    INT_VECTOR_Destroy(&group_ids);
+
+    // Since we have moved the contents of the params vector to the get group vector, we can just free the params vector (not its content)
+    USP_SAFE_FREE(params.vector);
+}
+
+/*********************************************************************//**
+**
+**  bulkdata_append_to_result_map
+**
+**  Appends the parameters for the specified parameter reference to the results map
+**  When doing this, take account of alternative name, and type of each parameter
+**
+** \param   pr - pointer to parameter reference to expand
+** \param   ggv - pointer to group get vector containing paths and values of params which were retrieved
+** \param   report_map - map which this function appends the 'param_values' map to
+**
+** \return  None
+**
+**************************************************************************/
+void bulkdata_append_to_result_map(param_ref_entry_t *pr, group_get_vector_t *ggv, kv_vector_t *report_map)
+{
+    int err;
+    int i;
+    char reduced_path[MAX_DM_PATH];
+    char param_type_value[MAX_DM_VALUE_LEN+1];       // plus 1 to include leading JSON type character
+    char type;
+    group_get_entry_t *gge;
+
+    // Iterate over each parameter, adding it to the result map
+    for (i=0; i < pr->num_entries; i++)
+    {
+        // Skip to next parameter if an error occurred getting the parameter, or no value was obtained for it
+        gge = &ggv->vector[pr->index + i];
+        if ((gge->err_code != USP_ERR_OK) || (gge->value == NULL))
         {
-            goto exit;
+            continue;
         }
 
-        // Add the parameter to the map
-        KV_VECTOR_Add(param_values, cur_path, value);
+        // Calculate the path name to put into the result map
+        err = bulkdata_reduce_to_alt_name(pr->path_expr, gge->path, pr->alt_name, reduced_path, sizeof(reduced_path));
+        if (err != USP_ERR_OK)
+        {
+            USP_ERR_SetMessage("%s: bulkdata_reduce_to_alt_name(%s) failed", __FUNCTION__, gge->path);
+            continue; // Skip this parameter, if an error occurred
+        }
+
+        // Calculate the JSON type of the parameter
+        type = DATA_MODEL_GetJSONParameterType(gge->path);
+
+        // Form the value string containing JSON type character, followed by actual value
+        param_type_value[0] = type;
+        USP_STRNCPY(&param_type_value[1], gge->value, sizeof(param_type_value)-1);
+
+        // Finally insert the string into the report map
+        KV_VECTOR_Add(report_map, reduced_path, param_type_value);
     }
-
-    err = USP_ERR_OK;
-
-exit:
-    STR_VECTOR_Destroy(&params);
-
-    if (err != USP_ERR_OK)
-    {
-        KV_VECTOR_Destroy(param_values);
-    }
-
-    return err;
 }
 
 /*********************************************************************//**
 **
 ** bulkdata_platform_get_profile_control_params
 **
-** Obtains all of the controlling parameters (eg reporting interval, 
+** Obtains all of the controlling parameters (eg reporting interval,
 ** time reference, URL, username, password etc) for a given profile into a structure
 **
 ** \param   bp - pointer to profile
@@ -1733,7 +1911,7 @@ int bulkdata_platform_get_profile_control_params(bulkdata_profile_t *bp, profile
     {
         return err;
     }
-    
+
     // Limit the maximum number of reports retained
     if (ctrl_params->num_retained_failed_reports == -1)
     {
@@ -1753,14 +1931,6 @@ int bulkdata_platform_get_profile_control_params(bulkdata_profile_t *bp, profile
     err = DATA_MODEL_GetParameterValue(path, ctrl_params->url, sizeof(ctrl_params->url), 0);
     if (err != USP_ERR_OK)
     {
-        return err;
-    }
-
-    // Exit if URL has not been setup by the ACS
-    if (ctrl_params->url[0] == '\0')
-    {
-        USP_LOG_Error("%s: Profile %d started but it's URL has not been setup", __FUNCTION__, bp->profile_id);
-        bp->is_working = false;
         return err;
     }
 
@@ -1814,7 +1984,7 @@ int bulkdata_platform_get_profile_control_params(bulkdata_profile_t *bp, profile
 **  Starts the specified bulk data profile
 **
 ** \param   bp - pointer to profile
-**          
+**
 ** \return  USP_ERR_OK if operation completed successfully
 **
 **************************************************************************/
@@ -1822,15 +1992,7 @@ int bulkdata_start_profile(bulkdata_profile_t *bp)
 {
     int err;
     int wait_time;
-    profile_ctrl_params_t ctrl;
 
-
-    // Exit if unable to obtain the control parameters for this profile
-    err = bulkdata_platform_get_profile_control_params(bp, &ctrl);
-    if (err != USP_ERR_OK)
-    {
-        return err;
-    }
 
     // Determine the time until the timer should next fire
     wait_time = bulkdata_calc_waittime_to_next_reporting_interval(bp->reporting_interval, bp->time_reference);
@@ -1841,7 +2003,7 @@ int bulkdata_start_profile(bulkdata_profile_t *bp)
     {
         return err;
     }
-    
+
     return USP_ERR_OK;
 }
 
@@ -1854,7 +2016,7 @@ int bulkdata_start_profile(bulkdata_profile_t *bp)
 **
 ** \param   bp - pointer to profile
 ** \param   delta_time - pointer to variable in which to return the amount of time until this timer next fires, or NULL if unused by called
-**          
+**
 ** \return  USP_ERR_OK if operation completed successfully
 **
 **************************************************************************/
@@ -1877,7 +2039,7 @@ int bulkdata_resync_profile(bulkdata_profile_t *bp, int *delta_time)
     {
         return USP_ERR_OK;
     }
-    
+
     // Exit if unable to restart the sync timer with the time until the next reporting interval (or retry)
     err = SYNC_TIMER_Reload(bulkdata_process_profile, bp->profile_id, time(NULL) + wait_time);
     if (err != USP_ERR_OK)
@@ -1896,8 +2058,8 @@ int bulkdata_resync_profile(bulkdata_profile_t *bp, int *delta_time)
 **  This may be because of a retry or because we have reached the scheduled report time
 **
 ** \param   bp - pointer to profile
-**          
-** \return  
+**
+** \return
 **
 **************************************************************************/
 unsigned bulkdata_calc_waittime_to_next_send(bulkdata_profile_t *bp)
@@ -1935,7 +2097,7 @@ unsigned bulkdata_calc_waittime_to_next_send(bulkdata_profile_t *bp)
 **
 ** \param   interval - Device.BulkData.Profile.{i}.ReportingInterval
 ** \param   time_reference - Device.BulkData.Profile.{i}.TimeReference
-**          
+**
 ** \return  Number of seconds until the next scheduled report for this profile should be generated and sent
 **
 **************************************************************************/
@@ -1947,7 +2109,7 @@ unsigned bulkdata_calc_waittime_to_next_reporting_interval(time_t interval, time
     cur_time = time(NULL);
     wait_time = interval - ((cur_time - time_reference) % interval);
     if (wait_time > interval)          // Needed if time_ref > cur_time
-    {        
+    {
         wait_time -= interval;         // Do not use % operator, as we never want to get a value of 0 (want 'interval' instead)
     }
 
@@ -1961,7 +2123,7 @@ unsigned bulkdata_calc_waittime_to_next_reporting_interval(time_t interval, time
 **  Stops the specified bulk data profile
 **
 ** \param   bp - pointer to profile
-**          
+**
 ** \return  USP_ERR_OK if operation completed successfully
 **
 **************************************************************************/
@@ -1990,13 +2152,16 @@ int bulkdata_stop_profile(bulkdata_profile_t *bp)
 **  Called when it is time to generate a report on a profile
 **
 ** \param   id - identifier of the profile to generate a report on
-**          
+**
 ** \return  None
 **
 **************************************************************************/
 void bulkdata_process_profile(int id)
 {
     bulkdata_profile_t *bp;
+    int err;
+    bdc_protocol_t protocol;
+    char path[MAX_DM_PATH];
 
     // Exit if unable to find the profile
     // NOTE: This should never occur if the software is working correctly
@@ -2005,26 +2170,46 @@ void bulkdata_process_profile(int id)
     {
         return;
     }
-    
-    // Process the profile
-    bulkdata_process_profile_work(bp);
+
+    // Exit if unable to get Protocol for this profile
+    USP_SNPRINTF(path, sizeof(path), "Device.BulkData.Profile.%d.Protocol", bp->profile_id);
+    err = DM_ACCESS_GetEnum(path, &protocol, bdc_protocols, NUM_ELEM(bdc_protocols));
+    if (err != USP_ERR_OK)
+    {
+        return;
+    }
+
+    // Process the report using the required protocol
+    switch(protocol)
+    {
+        case kBdcProtocol_HTTP:
+            bulkdata_process_profile_http(bp);
+            break;
+
+        case kBdcProtocol_UspEvent:
+            bulkdata_process_profile_usp_event(bp);
+            break;
+
+        default:
+            break;
+    }
 }
 
 /*********************************************************************//**
 **
-**  bulkdata_process_profile_work
+**  bulkdata_process_profile_http
 **
 **  Perform the work of processing a profile
 **
 ** \param   bp - pointer to bulk data profile to process
-**          
+**
 ** \return  None
 **
 **************************************************************************/
-void bulkdata_process_profile_work(bulkdata_profile_t *bp)
+void bulkdata_process_profile_http(bulkdata_profile_t *bp)
 {
     int err;
-    report_t *cur_report;    
+    report_t *cur_report;
     char *json_report;
     profile_ctrl_params_t ctrl;
     unsigned char *compressed_report;
@@ -2046,7 +2231,7 @@ void bulkdata_process_profile_work(bulkdata_profile_t *bp)
         {
             bulkdata_drop_oldest_retained_reports(bp, ctrl.num_retained_failed_reports);
         }
-    
+
         // Append the report map for this reporting interval
         cur_report = &bp->reports[bp->num_retained_reports];
         cur_report->collection_time = time(NULL);
@@ -2064,7 +2249,7 @@ void bulkdata_process_profile_work(bulkdata_profile_t *bp)
     }
 
     // Exit if unable to generate the report
-    json_report = bulkdata_generate_json_report(bp, &ctrl);
+    json_report = bulkdata_generate_json_report(bp, ctrl.report_timestamp);
     if (json_report == NULL)
     {
         USP_ERR_SetMessage("%s: bulkdata_generate_json_report failed", __FUNCTION__);
@@ -2088,11 +2273,102 @@ void bulkdata_process_profile_work(bulkdata_profile_t *bp)
     // NOTE: From this point on, only the compressed_report exists
 
     // Exit if failed to tell BDC thread to send the report
-    err = bulkdata_schedule_sending_report(&ctrl, bp, compressed_report, compressed_len);
+    err = bulkdata_schedule_sending_http_report(&ctrl, bp, compressed_report, compressed_len);
     if (err != USP_ERR_OK)
     {
         DEVICE_BULKDATA_NotifyTransferResult(bp->profile_id, kBDCTransferResult_Failure_Other);
     }
+}
+
+/*********************************************************************//**
+**
+**  bulkdata_process_profile_usp_event
+**
+**  Send the json report using USP Push! event
+**
+** \param   bp - pointer to bulk data profile to process
+**
+** \return  None
+**
+**************************************************************************/
+void bulkdata_process_profile_usp_event(bulkdata_profile_t *bp)
+{
+    int err;
+    char path[MAX_DM_PATH];
+    kv_vector_t event_args;
+    kv_pair_t kv;
+    report_t *cur_report;
+    char *json_report;
+    char report_timestamp[33];
+
+    // Exit if the MTP has not been connected to successfully after bootup
+    // This is to prevent BDC events being enqueued before the Boot! event is sent (the Boot! event is only sent after successfully connecting to the MTP).
+    if (DM_EXEC_IsNotificationsEnabled() == false)
+    {
+        goto exit;
+    }
+
+    // Exit if unable to get ReportTimestamp
+    USP_SNPRINTF(path, sizeof(path), "Device.BulkData.Profile.%d.JSONEncoding.ReportTimestamp", bp->profile_id);
+    err = DATA_MODEL_GetParameterValue(path, report_timestamp, sizeof(report_timestamp), 0);
+    if (err != USP_ERR_OK)
+    {
+        return;
+    }
+
+    // When sending via USP events, only one report is ever sent in each USP event
+    // So ensure all retained reports are removed. NOTE: Clearing the reports here is only necessary when switching protocol from HTTP to USP event, and where HTTP had some unsent reports
+    bulkdata_clear_retained_reports(bp);
+    cur_report = &bp->reports[0];
+    cur_report->collection_time = time(NULL);
+    KV_VECTOR_Init(&cur_report->report_map);
+
+    // Exit if unable to get the map containing the report contents
+    err = bulkdata_calc_report_map(bp, &cur_report->report_map);
+    if (err != USP_ERR_OK)
+    {
+        USP_ERR_SetMessage("%s: bulkdata_calc_report_map failed", __FUNCTION__);
+        return;
+    }
+    bp->num_retained_reports = 1;
+
+    // Exit if unable to generate the report
+    json_report = bulkdata_generate_json_report(bp, report_timestamp);
+    if (json_report == NULL)
+    {
+        USP_ERR_SetMessage("%s: bulkdata_generate_json_report failed", __FUNCTION__);
+        return;
+    }
+
+    // NOTE: No need to print out the JSON report here, the USP message trace will contain it
+
+    // Construct event_args manually to avoid the overhead of a malloc and copy of the report in KV_VECTOR_Add()
+    kv.key = "Data";
+    kv.value = json_report;
+    event_args.vector = &kv;
+    event_args.num_entries = 1;
+
+    USP_SNPRINTF(path, sizeof(path), "Device.BulkData.Profile.%d.Push!", bp->profile_id);
+    DEVICE_SUBSCRIPTION_ProcessAllEventCompleteSubscriptions(path, &event_args);
+
+    // Free the report. No need to free the event_args as json_report is the only thing dynamically allocated in it
+    free(json_report);      // The report is not allocated via USP_MALLOC
+
+    // From the point of view of this code, the report(s) have been successfully sent, so don't retain them
+    // NOTE: Sending of the reports successfully is delegated to the USP notification retry mechanism
+    bulkdata_clear_retained_reports(bp);
+    bp->retry_count = 0;
+
+exit:
+    // Exit if unable to restart the sync timer with the time until the next reporting interval
+    err = bulkdata_resync_profile(bp, NULL);
+    if (err != USP_ERR_OK)
+    {
+        return;
+    }
+
+    // Uncomment the next line to see how much memory is in use by USP Agent after each post
+//    USP_MEM_PrintSummary();
 }
 
 /*********************************************************************//**
@@ -2103,7 +2379,7 @@ void bulkdata_process_profile_work(bulkdata_profile_t *bp)
 **
 ** \param   bp - pointer to bulk data profile containing reports
 ** \param   num_reports_to_keep - the total number of failed reports to retain
-**          
+**
 ** \return  None
 **
 **************************************************************************/
@@ -2112,7 +2388,7 @@ void bulkdata_drop_oldest_retained_reports(bulkdata_profile_t *bp, int num_repor
     int i;
     int reports_to_destroy;
 
-    // Destroy the oldest report maps    
+    // Destroy the oldest report maps
     reports_to_destroy = bp->num_retained_reports - num_reports_to_keep;
     for (i=0; i<reports_to_destroy; i++)
     {
@@ -2124,7 +2400,7 @@ void bulkdata_drop_oldest_retained_reports(bulkdata_profile_t *bp, int num_repor
     {
         memmove(&bp->reports[0], &bp->reports[reports_to_destroy], num_reports_to_keep*sizeof(report_t));
     }
-    
+
     bp->num_retained_reports = num_reports_to_keep;
 }
 
@@ -2135,7 +2411,7 @@ void bulkdata_drop_oldest_retained_reports(bulkdata_profile_t *bp, int num_repor
 **  Clears out all of the retained reports
 **
 ** \param   bp - pointer to bulk data profile to clear all report maps
-**          
+**
 ** \return  None
 **
 **************************************************************************/
@@ -2143,7 +2419,7 @@ void bulkdata_clear_retained_reports(bulkdata_profile_t *bp)
 {
     int i;
     report_t *r;
-    
+
     for (i=0; i < bp->num_retained_reports; i++)
     {
         r = &bp->reports[i];
@@ -2157,137 +2433,6 @@ void bulkdata_clear_retained_reports(bulkdata_profile_t *bp)
 
 /*********************************************************************//**
 **
-**  bulkdata_calc_report_map
-**
-**  Calculates the map containing {parameter name vs type/value} for the specified profile
-**
-** \param   context - pointer to global bulkdata context
-** \param   bp - pointer to bulk data profile to get the report map for
-** \param   report_map - initialised map in which to return the report map
-**          
-** \return  USP_ERR_OK if successful
-**
-**************************************************************************/
-int bulkdata_calc_report_map(bulkdata_profile_t *bp, kv_vector_t *report_map)
-{
-    int err;
-    int i;
-    char *path;
-    char *alt_name;
-    kv_vector_t param_refs;    // Map of all parameter references {parameter path vs alternative name} (from Device.BulkData.Profile.{i}.Parameter.*)
-    kv_vector_t param_values; // Map of {parameter path vs value} for a single parameter reference. There will be multiple entries in this map if the parameter reference contains wildcards or a partial path
-    kv_pair_t *kv;
-    
-    KV_VECTOR_Init(&param_values);
-    KV_VECTOR_Init(&param_refs);
-    
-    // Get the paths and alternative names of all parameters that are to be posted from this profile
-    err = bulkdata_platform_get_parameter_paths(bp->profile_id, &param_refs);
-    if (err != USP_ERR_OK)
-    {
-        USP_ERR_SetMessage("%s: bulkdata_platform_get_parameter_paths() failed", __FUNCTION__);
-        goto exit;
-    }
-
-    // Iterate over each parameter to get it's values
-    for (i=0; i < param_refs.num_entries; i++)
-    {
-        // Clear the map into which we place the expanded paths and values for this path
-        KV_VECTOR_Destroy(&param_values);
-
-        // Skip this path if it is blank
-        kv = &param_refs.vector[i];
-        path = kv->key;
-        alt_name = kv->value;
-        if (*path == '\0')
-        {
-            continue;
-        }
-
-        // Get the expanded paths and values into the 'param_values' map
-        err = bulkdata_platform_get_parameter_values(path, &param_values);
-        if (err != USP_ERR_OK)
-        {
-            // Skip this parameter if an error occurred. Continue building up other parameters
-            USP_LOG_Warning("%s: bulkdata_platform_get_parameter_values(%s) failed", __FUNCTION__, path);
-            continue;
-        }
-        
-        // Append the obtained parameters to the report map, performing reduction of their name if an alternative_name is given
-        err = bulkdata_append_to_result_map(path, alt_name, &param_values, report_map); 
-        if (err != USP_ERR_OK)
-        {
-            // Skip this parameter if an error occurred. Continue building up other parameters
-            USP_LOG_Warning("%s: bulkdata_append_to_result_map(%s) failed", __FUNCTION__, path);
-            continue;
-        }
-    }
-
-    err = USP_ERR_OK;
-
-exit:
-    KV_VECTOR_Destroy(&param_refs);
-    KV_VECTOR_Destroy(&param_values);
-    return err;
-}
-
-/*********************************************************************//**
-**
-**  bulkdata_append_to_result_map
-**
-**  Appends the parameters contained in a map to the results map
-**  When doing this, take account of alternative name, and type of each parameter
-**
-** \param   origin_path - original path to parameter to get (This may be a partial path, or contain wildcards)
-** \param   alt_name - alternative name for the above path
-** \param   param_values - map containing {parameter path vs parameter value} obtained from expansion of the 'path'
-** \param   report_map - map which this function appends the 'param_values' map to
-**          
-** \return  USP_ERR_OK if successful
-**
-**************************************************************************/
-int bulkdata_append_to_result_map(char *origin_path, char *alt_name, kv_vector_t *param_values, kv_vector_t *report_map)
-{
-    int err;
-    int i;
-    char *path;
-    char reduced_path[MAX_DM_PATH];
-    char param_type_value[MAX_DM_VALUE_LEN+1];       // plus 1 to include leading JSON type character
-    char type;
-    char *value;
-    kv_pair_t *kv;
-
-    // Iterate over each parameter, adding it to the result map
-    for (i=0; i < param_values->num_entries; i++)
-    {
-        kv = &param_values->vector[i];
-        path = kv->key;
-        value = kv->value;
-        
-        // Calculate the path name to put into the result map
-        err = bulkdata_reduce_to_alt_name(origin_path, path, alt_name, reduced_path, sizeof(reduced_path));
-        if (err != USP_ERR_OK)
-        {
-            USP_ERR_SetMessage("%s: bulkdata_reduce_to_alt_name(%s) failed", __FUNCTION__, path);
-            continue; // Skip this parameter, if an error occurred
-        }
-
-        // Calculate the JSON type of the parameter
-        type = DATA_MODEL_GetJSONParameterType(path);
-
-        // Form the value string containing JSON type character, followed by actual value
-        param_type_value[0] = type;
-        USP_STRNCPY(&param_type_value[1], value, sizeof(param_type_value)-1);
-
-        // Finally insert the string into the report map
-        KV_VECTOR_Add(report_map, reduced_path, param_type_value);
-    }
-
-    return USP_ERR_OK;
-}
-
-/*********************************************************************//**
-**
 **  bulkdata_reduce_to_alt_name
 **
 **  Reduce the full path name to one that (potentially) contains an alternative name
@@ -2296,9 +2441,9 @@ int bulkdata_append_to_result_map(char *origin_path, char *alt_name, kv_vector_t
 ** \param   spec - path specification (This may be a partial path, or contain wildcards, and one of it's expansions was 'path')
 ** \param   path - fully expanded data model path
 ** \param   alt_name - alternative name for the above path
-** \param   reduced_path - pointer to buffer in which to return the reduced name
-** \param   len - size of buffer in which to return the reduced name
-**          
+** \param   out_buf - pointer to buffer in which to return the reduced name
+** \param   buf_len - size of buffer in which to return the reduced name
+**
 ** \return  USP_ERR_OK if successful
 **
 **************************************************************************/
@@ -2307,6 +2452,9 @@ int bulkdata_reduce_to_alt_name(char *spec, char *path, char *alt_name, char *ou
     char *s;    // pointer stepping thru spec
     char *p;    // pointer stepping thru path
     char *o;    // pointer stepping thru out_buf
+    char *t;    // temp pointer
+
+    memset(out_buf, 0, buf_len);
 
     // Exit if no alt_name - no reduction necessary
     if (*alt_name == '\0')
@@ -2348,9 +2496,26 @@ int bulkdata_reduce_to_alt_name(char *spec, char *path, char *alt_name, char *ou
             {
                 // Copy index characters at wildcard
                 *o++ = *p++;
-                if (*p == '.')
+                if (*p == '.')  // Only move off the wildcard character when we have copied all of the index characters
                 {
-                    s++;    // Only move off the wildcard character when we have copied all of the index characters
+                    s++;
+                    *o++ = '.';
+                }
+            }
+            else if (*s == '[')
+            {
+                // Copy index characters at search expression
+                *o++ = *p++;
+                if (*p == '.')  // Only move after the search expression when we have copied all of the index characters
+                {
+                    // Find the end of the unique key
+                    // NOTE: We should always find the end of the unique key, as the code shouldn't be performing alt name reduction unless the path expression is valid
+                    t = strchr(s, ']');
+                    if (t != NULL)
+                    {
+                        s = t;
+                    }
+                    s++;
                     *o++ = '.';
                 }
             }
@@ -2380,48 +2545,6 @@ int bulkdata_reduce_to_alt_name(char *spec, char *path, char *alt_name, char *ou
     return USP_ERR_OK;
 }
 
-#if 0
-//--------------------------------------------------------------------------
-// Test code
-
-//int test_reduce(void)
-//{
-//    char buf[100];
-//
-//    // fully qualified
-//    bulkdata_reduce_to_alt_name("Device.Stuff.Hello", 
-//                                "Device.Stuff.Hello",
-//                                "alt", buf);
-//
-//    // partial path
-//    bulkdata_reduce_to_alt_name("Device.Stuff.Hello.", 
-//                                "Device.Stuff.Hello.This.Should.Be.1.Addded",
-//                                "alt", buf);
-//
-//    // partial path, no trailing '.' in spec
-//    bulkdata_reduce_to_alt_name("Device.Stuff.Hello", 
-//                                "Device.Stuff.Hello.This.Should.Be.2.Addded",
-//                                "alt", buf);
-//
-//    // wildcard
-//    bulkdata_reduce_to_alt_name("Device.*.Stuff.*.Hello", 
-//                                "Device.56.Stuff.72.Hello",
-//                                "alt", buf);
-//
-//    // wildcard with partial path
-//    bulkdata_reduce_to_alt_name("Device.*.Stuff.*.Hello.", 
-//                                "Device.56.Stuff.72.Hello.This.Should.Be.3.Addded",
-//                                "alt", buf);
-//
-//    // wildcard with partial path, no trailing '.' in spec
-//    bulkdata_reduce_to_alt_name("Device.*.Stuff.*.Hello", 
-//                                "Device.56.Stuff.72.Hello.This.Should.Be.4.Addded",
-//                                "alt", buf);
-//
-//    return 0;
-//}
-#endif
-
 /*********************************************************************//**
 **
 **  bulkdata_generate_json_report
@@ -2431,12 +2554,12 @@ int bulkdata_reduce_to_alt_name(char *spec, char *path, char *alt_name, char *ou
 **  See TR-157 section A.4.2 (end) for an example, and section A.3.5.2 for layout of content containing failed report transmissions
 **
 ** \param   bp - pointer to bulk data profile containing all reports (current and retained)
-** \param   ctrl - pointer to structure containing the controlling parameters for the profile we are generating a report for
-**          
+** \param   report_timestamp - value of Device.BulkData.Profile.{i}.JSONEncoding.ReportTimestamp
+**
 ** \return  pointer to NULL terminated dynamically allocated buffer containing the serialized report to send
 **
 **************************************************************************/
-char *bulkdata_generate_json_report(bulkdata_profile_t *bp, profile_ctrl_params_t *ctrl)
+char *bulkdata_generate_json_report(bulkdata_profile_t *bp, char *report_timestamp)
 {
     JsonNode *top;          // top of report
     JsonNode *array;        // array of reports (retained + current)
@@ -2466,11 +2589,11 @@ char *bulkdata_generate_json_report(bulkdata_profile_t *bp, profile_ctrl_params_
 
         // Add Collection time to each json report element (only if specified and not 'None')
         element = json_mkobject();
-        if (strcmp(ctrl->report_timestamp, "Unix-Epoch")==0)
+        if (strcmp(report_timestamp, "Unix-Epoch")==0)
         {
             json_append_member(element, "CollectionTime", json_mknumber(report->collection_time));
-        } 
-        else if (strcmp(ctrl->report_timestamp, "ISO-8601")==0)
+        }
+        else if (strcmp(report_timestamp, "ISO-8601")==0)
         {
             result = iso8601_from_unix_time(report->collection_time, buf, sizeof(buf));
             if (result != NULL)
@@ -2524,7 +2647,7 @@ char *bulkdata_generate_json_report(bulkdata_profile_t *bp, profile_ctrl_params_
     result = json_stringify(top, " ");
 
     // Clean up the JSON tree
-    json_delete(top);        // Other JsonNodes which are children of this top level tree will be deleted 
+    json_delete(top);        // Other JsonNodes which are children of this top level tree will be deleted
 
     return result;
 }
@@ -2539,7 +2662,7 @@ char *bulkdata_generate_json_report(bulkdata_profile_t *bp, profile_ctrl_params_
 ** \param   input_buf - pointer to buffer containing the uncompressed report
 ** \param   input_len - length of the data in the buffer containing the uncompressed report
 ** \param   p_output_len - pointer to variable in which to return the length of the compressed report
-**          
+**
 ** \return  pointer to compressed report to send
 **          NOTE: if compression is not required or fails, the uncompressed report is returned
 **
@@ -2618,20 +2741,20 @@ unsigned char *bulkdata_compress_report(profile_ctrl_params_t *ctrl, char *input
 
 /*********************************************************************//**
 **
-**  bulkdata_schedule_sending_report
+**  bulkdata_schedule_sending_http_report
 **
 **  Tells the BDC thread to send the report
-**  NOTE: Ownership of full_url passes to bulkdata_send_report_inner()
+**  NOTE: Ownership of report passes to BDC_EXEC
 **
 ** \param   ctrl - parameters controlling the profile e.g. URL to upload report to
 ** \param   bp - pointer to bulk data profile to get the report map for
 ** \param   report - pointer to buffer containing the report to send (which may be compressed)
 ** \param   report_len - length of json_report
-**          
+**
 ** \return  USP_ERR_OK if successful
 **
 **************************************************************************/
-int bulkdata_schedule_sending_report(profile_ctrl_params_t *ctrl, bulkdata_profile_t *bp, unsigned char *report, int report_len)
+int bulkdata_schedule_sending_http_report(profile_ctrl_params_t *ctrl, bulkdata_profile_t *bp, unsigned char *report, int report_len)
 {
     char *query_string = NULL;
     char *full_url = NULL;
@@ -2640,6 +2763,13 @@ int bulkdata_schedule_sending_report(profile_ctrl_params_t *ctrl, bulkdata_profi
     char *username;
     char *password;
 
+    // Exit if URL is empty
+    if (ctrl->url[0] == '\0')
+    {
+        USP_LOG_Error("%s: Profile %d started but it's URL has not been setup", __FUNCTION__, bp->profile_id);
+        return USP_ERR_INVALID_ARGUMENTS;
+    }
+
     // Exit if unable to generate the URI query string
     query_string = bulkdata_platform_get_uri_query_params(bp->profile_id);
     if (query_string == NULL)
@@ -2647,6 +2777,7 @@ int bulkdata_schedule_sending_report(profile_ctrl_params_t *ctrl, bulkdata_profi
         USP_ERR_SetMessage("%s: bulkdata_platform_get_uri_query_params failed", __FUNCTION__);
         return USP_ERR_INTERNAL_ERROR;
     }
+    USP_LOG_Info("BULK DATA: uri_query_string='%s'", query_string);
 
     // Create the full URL containing the base url and appended query string
     full_url = USP_MALLOC(strlen(ctrl->url) + strlen(query_string) + 1); // Plus 1 to include NULL terminator
@@ -2675,7 +2806,7 @@ int bulkdata_schedule_sending_report(profile_ctrl_params_t *ctrl, bulkdata_profi
     }
 
     // Exit if failed to post a message to BDC thread
-    // NOTE: Ownership of full_url, query_string, report, username and password passes to bulkdata_send_report_inner
+    // NOTE: Ownership of full_url, query_string, report, username and password passes to BDC_EXEC
     err = BDC_EXEC_PostReportToSend(bp->profile_id, full_url, query_string, username, password, report, report_len, flags);
     if (err != USP_ERR_OK)
     {
@@ -2692,7 +2823,7 @@ int bulkdata_schedule_sending_report(profile_ctrl_params_t *ctrl, bulkdata_profi
 **  Find a free profile slot
 **
 ** \param   None
-**          
+**
 ** \return  pointer to a free profile slot, or NULL if unable to fins a free profile
 **
 **************************************************************************/
@@ -2722,7 +2853,7 @@ bulkdata_profile_t *bulkdata_find_free_profile(void)
 **  Find the specified profile
 **
 ** \param   profile_id - Instance number of profile in Device.Bulkdata.Profile.{i}
-**          
+**
 ** \return  pointer to a free profile slot, or NULL if unable to find a free profile
 **
 **************************************************************************/
@@ -2744,4 +2875,72 @@ bulkdata_profile_t *bulkdata_find_profile(int profile_id)
     // If the code gets here, no matching profile was found
     return NULL;
 }
+
+//------------------------------------------------------------------------------------------
+// Code to test the bulkdata_reduce_to_alt_name() function
+#if 0
+char *reduce_to_alt_test_cases[] =
+{
+    // Path Expression                      // Resolved path                        // Expected Result
+
+    // fully qualified
+    "Device.Stuff.Hello",                   "Device.Stuff.Hello",                   "alt",
+
+    // partial path
+    "Device.Stuff.Hello.",                  "Device.Stuff.Hello.Obj.1.Param",       "alt.Obj.1.Param",
+
+    // partial path, no trailing '.' in expression
+    "Device.Stuff.Hello",                   "Device.Stuff.Hello.Obj.2.Param",       "alt.Obj.2.Param",
+
+    //------------------------
+    // basic wildcard
+    "Device.1.Stuff.*.Hello",               "Device.1.Stuff.72.Hello",              "alt.72",
+
+    // wildcard with partial path
+    "Device.*.ObjA.",                       "Device.56.ObjA.ObjB.7.Param",          "alt.56.ObjB.7.Param",
+
+    // 2 wildcards
+    "Device.*.Stuff.*.Hello",               "Device.56.Stuff.72.Hello",             "alt.56.72",
+
+    // 2 wildcards with partial path
+    "Device.*.Stuff.*.Hello.",              "Device.56.Stuff.72.Hello.Obj.3.Param", "alt.56.72.Obj.3.Param",
+
+    // wildcard with partial path, but path expression does not contain a trailing '.'
+    "Device.*.Stuff.*.Hello",               "Device.56.Stuff.72.Hello.Obj.4.Param", "alt.56.72.Obj.4.Param",
+
+    //------------------------
+    // basic search expression
+    "Device.[Param == \"string\"].Param",   "Device.56.Param",                      "alt.56",
+
+    // search expression with partial path
+    "Device.[Param == \"string\"].ObjA.",   "Device.56.ObjA.ObjB.7.Param",          "alt.56.ObjB.7.Param",
+
+    // 2 search expressions
+    "Device.[A==1].Stuff.[B==2].Hello",     "Device.56.Stuff.72.Hello",             "alt.56.72",
+
+    // 2 search expressions with partial path
+    "Device.[A==1].Stuff.[B==2].Hello.",    "Device.56.Stuff.72.Hello.Obj.3.Param", "alt.56.72.Obj.3.Param",
+
+    // 2 search expressions with partial path, but path expression does not contain a trailing '.'
+    "Device.[A==1].Stuff.[B==2].Hello",     "Device.56.Stuff.72.Hello.Obj.4.Param", "alt.56.72.Obj.4.Param",
+};
+
+void Test_ReduceToAltName(void)
+{
+    int i;
+    int err;
+    char buf[MAX_DM_PATH];
+
+    for (i=0; i < NUM_ELEM(reduce_to_alt_test_cases); i+=3)
+    {
+        err = bulkdata_reduce_to_alt_name(reduce_to_alt_test_cases[i], reduce_to_alt_test_cases[i+1], "alt", buf, sizeof(buf));
+        if ((err != USP_ERR_OK) || (strcmp(buf, reduce_to_alt_test_cases[i+2]) != 0))
+        {
+            printf("ERROR: [%d] Test case result for '%s => %s' is '%s' (expected '%s')\n", i/3, reduce_to_alt_test_cases[i], reduce_to_alt_test_cases[i+1], buf, reduce_to_alt_test_cases[i+2]);
+        }
+    }
+}
+#endif
+
+
 

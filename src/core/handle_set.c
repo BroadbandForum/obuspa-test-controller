@@ -1,33 +1,33 @@
 /*
  *
- * Copyright (C) 2019, Broadband Forum
- * Copyright (C) 2016-2019  CommScope, Inc
- * 
+ * Copyright (C) 2019-2021, Broadband Forum
+ * Copyright (C) 2016-2021  CommScope, Inc
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
- * 
+ *
  * 1. Redistributions of source code must retain the above copyright
  *    notice, this list of conditions and the following disclaimer.
- * 
+ *
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 
+ *
  * 3. Neither the name of the copyright holder nor the names of its
  *    contributors may be used to endorse or promote products derived from
  *    this software without specific prior written permission.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
  * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR 
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF 
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
  * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
  * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF 
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
  * THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
@@ -53,16 +53,26 @@
 #include "dm_trans.h"
 #include "path_resolver.h"
 #include "device.h"
+#include "group_set_vector.h"
+
+//------------------------------------------------------------------------------
+// Structure used to marshall entries in set group vector for a path expression
+// This structure is equivalent to the updated_obj_results object in the USP Set Response message
+typedef struct
+{
+    char *requested_path;   // Pointer to path expression (owned by USP Set Request message).
+    str_vector_t resolved_objs; // vector of object paths that have been resolved
+    int index;              // start index of parameters in set group vector for this requested path
+    int err_code;           // error code if path resolution failed for this requested path
+    char *err_msg;          // error message if path resolution failed for this requested path
+
+    int num_params;         // number of parameters to set in each resolved object
+    Usp__Set__UpdateParamSetting **param_settings;  // Pointer to vector of names of parameters to set (owned by USP request message)
+} set_expr_info_t;
 
 //------------------------------------------------------------------------------
 // Forward declarations. Note these are not static, because we need them in the symbol table for USP_LOG_Callstack() to show them
-int UpdateExpressionObjects(Usp__SetResp *set_resp, Usp__Set__UpdateObject *up, bool allow_partial);
-int UpdateObject_Trans(char *obj_path, 
-                        Usp__SetResp *set_resp,
-                        Usp__Set__UpdateObject *up, bool allow_partial);
-int UpdateObject(char *obj_path, 
-                 Usp__SetResp *set_resp,
-                 Usp__Set__UpdateObject *up);
+void Grouped_HandleSet(Usp__Msg *usp, char *controller_endpoint, mtp_reply_to_t *mrt);
 Usp__Msg *CreateSetResp(char *msg_id);
 Usp__SetResp__UpdatedObjectResult__OperationStatus__OperationFailure *AddSetResp_OperFailure(Usp__SetResp *set_resp, char *path, int err_code, char *err_msg);
 Usp__SetResp__UpdatedInstanceFailure *
@@ -73,8 +83,15 @@ Usp__SetResp__UpdatedObjectResult__OperationStatus__OperationSuccess *AddSetResp
 Usp__SetResp__UpdatedInstanceResult *AddOperSuccess_UpdatedInstRes(Usp__SetResp__UpdatedObjectResult__OperationStatus__OperationSuccess *oper_success, char *path);
 Usp__SetResp__UpdatedInstanceResult__UpdatedParamsEntry *AddUpdatedInstRes_ParamsEntry(Usp__SetResp__UpdatedInstanceResult *updated_inst_result, char *key, char *value);
 Usp__SetResp__ParameterError *AddUpdatedInstRes_ParamErr(Usp__SetResp__UpdatedInstanceResult *updated_inst_result, char *path, int err_code, char *err_msg);
-void RemoveSetResp_LastUpdateObjResult(Usp__SetResp *set_resp);
-int ParamError_FromSetRespToErrResp(Usp__Msg *set_msg, Usp__Msg *err_msg);
+void ExpandSetPathExpression(Usp__Set__UpdateObject *up, set_expr_info_t *si, group_set_vector_t *gsv);
+Usp__Msg *ProcessAllowPartialFalse(char *msg_id, set_expr_info_t *set_expr_info, int num_set_expr, group_set_vector_t *gsv);
+Usp__Msg *CreateErrRespFromFailedSetParams(char *msg_id, group_set_vector_t *gsv, int first_failure, int last_param_index);
+Usp__Msg *ProcessAllowPartialTrue(char *msg_id, set_expr_info_t *set_expr_info, int num_set_expr, group_set_vector_t *gsv);
+void ProcessAllowPartialTrue_Expression(char *msg_id, Usp__SetResp *set_resp, set_expr_info_t *si, group_set_vector_t *gsv);
+void PopulateSetResp_OperSuccess(Usp__SetResp *set_resp, set_expr_info_t *si, group_set_vector_t *gsv);
+void DestroySetExprInfo(set_expr_info_t *set_expr_info, int num_set_expr);
+void PopulateSetResp_OperFailure(Usp__SetResp *set_resp, set_expr_info_t *si, group_set_vector_t *gsv);
+void PopulateOperFailure_UpdatedInstFailure(Usp__SetResp__UpdatedObjectResult__OperationStatus__OperationFailure *oper_failure, set_expr_info_t *si, int obj_index, group_set_vector_t *gsv);
 
 /*********************************************************************//**
 **
@@ -91,16 +108,35 @@ int ParamError_FromSetRespToErrResp(Usp__Msg *set_msg, Usp__Msg *err_msg);
 **************************************************************************/
 void MSG_HANDLER_HandleSet(Usp__Msg *usp, char *controller_endpoint, mtp_reply_to_t *mrt)
 {
+    Grouped_HandleSet(usp, controller_endpoint, mrt);
+}
+
+/*********************************************************************//**
+**
+** Grouped_HandleSet
+**
+** Handles a USP Set message
+**
+** \param   usp - pointer to parsed USP message structure. This is always freed by the caller (not this function)
+** \param   controller_endpoint - endpoint which sent this message
+** \param   mrt - details of where response to this USP message should be sent
+**
+** \return  None - This code must handle any errors by sending back error messages
+**
+**************************************************************************/
+void Grouped_HandleSet(Usp__Msg *usp, char *controller_endpoint, mtp_reply_to_t *mrt)
+{
     int i;
-    int err;
-    Usp__Set__UpdateObject *up;
+    set_expr_info_t *set_expr_info = NULL;
+    int num_set_expr = 0;
+    group_set_vector_t gsv;
     Usp__Set *set;
     Usp__Msg *resp = NULL;
-    dm_trans_vector_t trans;
-    int count;
+    int size;
 
     // Exit if message is invalid or failed to parse
     // This code checks the parsed message enums and pointers for expectations and validity
+    GROUP_SET_VECTOR_Init(&gsv);
     USP_ASSERT(usp->header != NULL);
     if ((usp->body == NULL) || (usp->body->msg_body_case != USP__BODY__MSG_BODY_REQUEST) ||
         (usp->body->request == NULL) || (usp->body->request->req_type_case != USP__REQUEST__REQ_TYPE_SET) ||
@@ -111,302 +147,601 @@ void MSG_HANDLER_HandleSet(Usp__Msg *usp, char *controller_endpoint, mtp_reply_t
         goto exit;
     }
 
-    // Create a Set Response
-    resp = CreateSetResp(usp->header->msg_id);
-
     // Exit if there are no parameters to set
     set = usp->body->request->set;
     if ((set->update_objs == NULL) || (set->n_update_objs == 0))
     {
+        resp = CreateSetResp(usp->header->msg_id);
         goto exit;
     }
 
-    // Start a transaction here, if allow_partial is at the global level
-    if (set->allow_partial == false)
-    {
-        err = DM_TRANS_Start(&trans);
-        if (err != USP_ERR_OK)
-        {
-            // If failed to start a transaction, delete the SetResponse message, and send an error message instead
-            resp = ERROR_RESP_CreateSingle(usp->header->msg_id, err, resp, NULL);
-            goto exit;
-        }
-    }
+    // Allocate memory for all set expressions
+    num_set_expr = set->n_update_objs;
+    size = num_set_expr * sizeof(set_expr_info_t);
+    set_expr_info = USP_MALLOC(size);
+    memset(set_expr_info, 0, size);
 
-    // Iterate over all update objects in the message
+    // Iterate over all expressions in the message, populating the set expression and group set vectors
     for (i=0; i < set->n_update_objs; i++)
     {
-        // Update the specified object
-        up = set->update_objs[i];
-        err = UpdateExpressionObjects(resp->body->response->set_resp, up, set->allow_partial);
-
-        // If allow_partial is at the global level, and an error occurred, then fail this
-        if ((set->allow_partial == false) && (err != USP_ERR_OK))
-        {
-            // A required object failed to update
-            // So delete the SetResponse message, and send an error message instead
-            count = ParamError_FromSetRespToErrResp(resp, NULL);
-            err = ERROR_RESP_CalcOuterErrCode(count, err);
-            resp = ERROR_RESP_CreateSingle(usp->header->msg_id, err, resp, ParamError_FromSetRespToErrResp);
-    
-            // Abort the global transaction, only logging errors (the message we want to send back over USP is above)
-            DM_TRANS_Abort();
-            goto exit;
-        }
+        ExpandSetPathExpression(set->update_objs[i], &set_expr_info[i], &gsv);
     }
 
-    // Commit transaction here, if allow_partial is at the global level
     if (set->allow_partial == false)
     {
-        err = DM_TRANS_Commit();
-        if (err != USP_ERR_OK)
-        {
-            // If failed to commit, delete the SetResponse message, and send an error message instead
-            resp = ERROR_RESP_CreateSingle(usp->header->msg_id, err, resp, NULL);
-            goto exit;
-        }
+        resp = ProcessAllowPartialFalse(usp->header->msg_id, set_expr_info, num_set_expr, &gsv);
     }
-
+    else
+    {
+        resp = ProcessAllowPartialTrue(usp->header->msg_id, set_expr_info, num_set_expr, &gsv);
+    }
 
 exit:
     MSG_HANDLER_QueueMessage(controller_endpoint, resp, mrt);
     usp__msg__free_unpacked(resp, pbuf_allocator);
+    GROUP_SET_VECTOR_Destroy(&gsv);
+    DestroySetExprInfo(set_expr_info, num_set_expr);
+
 }
 
 /*********************************************************************//**
 **
-** UpdateExpressionObjects
+** ExpandSetPathExpression
 **
-** Updates all the objects of the specified path expressions
-** Always fills in an OperFailure or OperSuccess for this data model object
+** Expands the specified path expression into the group set vector and set_expr_info vectors
 **
-** \param   set_resp - pointer to USP set response object, which is updated with the results of this operation
-** \param   up - pointer to parsed object to update
-** \param   allow_partial - set to true if failures one object do not affect all others.
+** \param   up - pointer to parsed object to update in USP Get request messsage
+** \param   si - pointer to info about specified path expression
+** \param   gsv - pointer to group set vector to add the parameters to
 **
-** \return  USP_ERR_OK if successful
+** \return  None - any errors detected are stored for later processing in the set result or group set vectors
 **
 **************************************************************************/
-int UpdateExpressionObjects(Usp__SetResp *set_resp, Usp__Set__UpdateObject *up, bool allow_partial)
+void ExpandSetPathExpression(Usp__Set__UpdateObject *up, set_expr_info_t *si, group_set_vector_t *gsv)
+{
+    int i, j;
+    int err;
+    combined_role_t combined_role;
+    char path[MAX_DM_PATH];
+    char *affected_obj;
+    Usp__Set__UpdateParamSetting *ps;
+
+    // Set default return value
+    si->requested_path = up->obj_path;
+    si->index = gsv->num_entries;
+
+    // Exit if there is no expression
+    if ((up->obj_path == NULL) || (up->obj_path[0] == '\0'))
+    {
+        USP_ERR_SetMessage("%s: Expression missing in SetRequest", __FUNCTION__);
+        si->err_code = USP_ERR_INVALID_ARGUMENTS;
+        si->err_msg = USP_STRDUP( USP_ERR_GetMessage() );
+        return;
+    }
+
+    // Exit if there are no parameters
+    if ((up->n_param_settings == 0) || (up->param_settings == NULL))
+    {
+        USP_ERR_SetMessage("%s: Parameter names missing in SetRequest", __FUNCTION__);
+        si->err_code = USP_ERR_INVALID_ARGUMENTS;
+        si->err_msg = USP_STRDUP( USP_ERR_GetMessage() );
+        return;
+    }
+
+    // Associate names of parameters to set with this path expression
+    si->num_params = up->n_param_settings;
+    si->param_settings = up->param_settings;
+
+    // Exit if unable to resolve the path expression specifying the objects to update
+    MSG_HANDLER_GetMsgRole(&combined_role);
+    err = PATH_RESOLVER_ResolveDevicePath(up->obj_path, &si->resolved_objs, NULL, kResolveOp_Set, NULL, &combined_role, 0);
+    if (err != USP_ERR_OK)
+    {
+        si->err_code = err;
+        si->err_msg = USP_STRDUP( USP_ERR_GetMessage() );
+        return;
+    }
+
+    // Exit if the path expression resolves to no objects
+    if (si->resolved_objs.num_entries == 0)
+    {
+        USP_ERR_SetMessage("%s: Expression does not reference any objects", __FUNCTION__);
+        si->err_code = USP_ERR_OBJECT_DOES_NOT_EXIST;
+        si->err_msg = USP_STRDUP( USP_ERR_GetMessage() );
+        return;
+    }
+
+    // Iterate over all objects which have been resolved from the path expression
+    for (i=0; i < si->resolved_objs.num_entries; i++)
+    {
+        affected_obj = si->resolved_objs.vector[i];
+
+        // Iterate over all parameters to be set for these objects
+        for (j=0; j < up->n_param_settings; j++)
+        {
+            // Add the parameter (full path) to the group set vector
+            ps = up->param_settings[j];
+            USP_SNPRINTF(path, sizeof(path), "%s.%s", affected_obj, ps->param);
+            GROUP_SET_VECTOR_Add(gsv, path, ps->value, ps->required, &combined_role);
+        }
+    }
+}
+
+/*********************************************************************//**
+**
+** ProcessAllowPartialFalse
+**
+** Processes a Set request where AllowPartial is false. This means that any error setting any required parameter aborts all
+**
+** \param   msg_id - string containing the message id of the USP message, which initiated this response
+** \param   set_expr_info - pointer to array of set expr info structures
+** \param   num_set_expr - number of elements in the array
+** \param   gsv - group set vector containing all parameters to set
+**
+** \return  None - this function puts any errors into the response message
+**
+**************************************************************************/
+Usp__Msg *ProcessAllowPartialFalse(char *msg_id, set_expr_info_t *set_expr_info, int num_set_expr, group_set_vector_t *gsv)
 {
     int i;
     int err;
-    str_vector_t obj_paths;
-    combined_role_t combined_role;
-    char err_msg[128];
+    dm_trans_vector_t trans;
+    set_expr_info_t *si;
+    int first_failure;
+    Usp__Msg *resp;
+    Usp__SetResp *set_resp;
 
-    // Return OperFailure if there is no expression
-    STR_VECTOR_Init(&obj_paths);
-    if ((up->obj_path == NULL) || (up->obj_path[0] == '\0'))
+    // Exit if any of the path expressions failed
+    for (i=0; i < num_set_expr; i++)
     {
-        USP_SNPRINTF(err_msg, sizeof(err_msg), "%s: Expression missing in SetRequest", __FUNCTION__);
-        AddSetResp_OperFailure(set_resp, up->obj_path, USP_ERR_INVALID_ARGUMENTS, err_msg);
-        err = USP_ERR_OK;
-        goto exit;
-    }
-
-    // Return OperFailure if there are no parameters
-    if ((up->n_param_settings == 0) || (up->param_settings == NULL))
-    {
-        USP_SNPRINTF(err_msg, sizeof(err_msg), "%s: Parameter names missing in SetRequest", __FUNCTION__);
-        AddSetResp_OperFailure(set_resp, up->obj_path, USP_ERR_INVALID_ARGUMENTS, err_msg);
-        err = USP_ERR_OK;
-        goto exit;
-    }
-
-    // Return OperFailure if an internal error occurred
-    MSG_HANDLER_GetMsgRole(&combined_role);
-    err = PATH_RESOLVER_ResolveDevicePath(up->obj_path, &obj_paths, kResolveOp_Set, NULL, &combined_role, 0);
-    if (err != USP_ERR_OK)
-    {
-        AddSetResp_OperFailure(set_resp, up->obj_path, err, USP_ERR_GetMessage());
-        goto exit;
-    }
-
-    // Return OperFailure if none of the specified objects exist in the schema
-    if (obj_paths.num_entries == 0)
-    {
-        USP_SNPRINTF(err_msg, sizeof(err_msg), "%s: Expression does not reference any objects", __FUNCTION__);
-        AddSetResp_OperFailure(set_resp, up->obj_path, USP_ERR_OBJECT_DOES_NOT_EXIST, err_msg);
-        err = USP_ERR_OK;
-        goto exit;
-    }
-
-    // Iterate over all object paths specified for this 'Object'
-    for (i=0; i < obj_paths.num_entries; i++)
-    {
-        err = UpdateObject_Trans(obj_paths.vector[i], set_resp, up, allow_partial);
-        if (err != USP_ERR_OK)
+        si = &set_expr_info[i];
+        if (si->err_code != USP_ERR_OK)
         {
-            goto exit;
+            USP_ERR_SetMessage("%s", si->err_msg);
+            resp = ERROR_RESP_CreateSingle(msg_id, si->err_code, NULL, NULL);
+            return resp;
         }
     }
 
-    // If the code gets here, then all parameters of all objects have been set successfully
-    err = USP_ERR_OK;
+    // Exit if unable to start a transaction
+    err = DM_TRANS_Start(&trans);
+    if (err != USP_ERR_OK)
+    {
+        resp = ERROR_RESP_CreateSingle(msg_id, err, NULL, NULL);
+        return resp;
+    }
 
-exit:
-    STR_VECTOR_Destroy(&obj_paths);
-    return err;
+    // Attempt to set the values of all parameters
+    GROUP_SET_VECTOR_SetValues(gsv, 0, gsv->num_entries);
+
+    // Exit if any of the required parameters failed to set
+    first_failure = GROUP_SET_VECTOR_GetFailureIndex(gsv, 0, gsv->num_entries);
+    if (first_failure != INVALID)
+    {
+        DM_TRANS_Abort();
+        resp = CreateErrRespFromFailedSetParams(msg_id, gsv, first_failure, gsv->num_entries - 1);
+        return resp;
+    }
+
+    // Exit if unable to commit the transaction
+    err = DM_TRANS_Commit();
+    if (err != USP_ERR_OK)
+    {
+        resp = ERROR_RESP_CreateSingle(msg_id, err, NULL, NULL);
+        return resp;
+    }
+
+    // If the code gets here, all required parameters have been set successfully
+    // So form the response message
+    resp = CreateSetResp(msg_id);
+    set_resp = resp->body->response->set_resp;
+
+    // Iterate over all path expressions
+    for (i=0; i < num_set_expr; i++)
+    {
+        si = &set_expr_info[i];
+        PopulateSetResp_OperSuccess(set_resp, si, gsv);
+    }
+
+    return resp;
 }
 
 /*********************************************************************//**
 **
-** UpdateObject_Trans
+** CreateErrRespFromFailedSetParams
 **
-** Wrapper around UpdateObject() which performs a transaction at this level, if allow_partial is true
+** Creates an error response containing all failed required parameters
 **
-** \param   obj_path - path to the object to update
-** \param   set_resp - USP Message OperationSuccess Object to add the result of the set to
-** \param   up - pointer to parsed USP UpdateObject message
-** \param   allow_partial - set to true if failures in this object do not affect all others.
-**                          If allow_partial is set then we perform a transaction at this level
+** \param   msg_id - string containing the message id of the USP message, which initiated this response
+** \param   gsv - group set vector containing all parameters
+** \param   first_failure - index of the first failed parameter in the group set vector
+** \param   last_param_index - index of the last parameter that could contain a failure that we want to report in param errs
 **
-** \return  USP_ERR_OK if successful
+** \return  pointer to USP error response message
 **
 **************************************************************************/
-int UpdateObject_Trans(char *obj_path, 
-                        Usp__SetResp *set_resp,
-                        Usp__Set__UpdateObject *up, bool allow_partial)
+Usp__Msg *CreateErrRespFromFailedSetParams(char *msg_id, group_set_vector_t *gsv, int first_failure, int last_param_index)
+{
+    int i;
+    int outer_err_code;
+    group_set_entry_t *gse;
+    Usp__Msg *resp;
+
+    // Calculate the outer error code for the error response, based on the error message of the first failing parameter
+    gse = &gsv->vector[first_failure];
+    outer_err_code = ERROR_RESP_CalcOuterErrCode(1, gse->err_code);
+
+    // Create an error response
+    USP_ERR_SetMessage("%s", gse->err_msg);
+    resp = ERROR_RESP_CreateSingle(msg_id, outer_err_code, NULL, NULL);
+
+    // Populate the error response with param errors for all failing required parameters
+    for (i=first_failure; i <= last_param_index; i++)
+    {
+        gse = &gsv->vector[i];
+        if ((gse->err_code != USP_ERR_OK) && (gse->is_required))
+        {
+            ERROR_RESP_AddParamError(resp, gse->path, gse->err_code, gse->err_msg);
+        }
+    }
+
+    return resp;
+}
+
+/*********************************************************************//**
+**
+** ProcessAllowPartialTrue
+**
+** Processes a Set request where AllowPartial is true, generating a response message
+** AllowPartial==true means that failures abort the expression they affect
+**
+** \param   msg_id - string containing the message id of the USP message, which initiated this response
+** \param   set_expr_info - vector of set results, one for each resolved object
+** \param   num_set_expr - the number of entries in the set_expr_info vector
+** \param   gsv - group set vector containing all parameters to set
+**
+** \return  None - this function puts any errors into the response message
+**
+**************************************************************************/
+Usp__Msg *ProcessAllowPartialTrue(char *msg_id, set_expr_info_t *set_expr_info, int num_set_expr, group_set_vector_t *gsv)
+{
+    int i;
+    Usp__Msg *resp;
+    Usp__SetResp *set_resp;
+
+    // Form the response message
+    resp = CreateSetResp(msg_id);
+    set_resp = resp->body->response->set_resp;
+
+    // Iterate over all resolved expressions
+    for (i=0; i < num_set_expr; i++)
+    {
+        ProcessAllowPartialTrue_Expression(msg_id, set_resp, &set_expr_info[i], gsv);
+    }
+
+    return resp;
+}
+
+/*********************************************************************//**
+**
+** ProcessAllowPartialTrue_Expression
+**
+** Processes a single expression in a Set request where AllowPartial is true, generating a response message
+**
+** \param   msg_id - string containing the message id of the USP message, which initiated this response
+** \param   set_resp - pointer to set response message to populate with success or failure responses
+** \param   si - pointer to set_expr_info describing the expression
+** \param   gsv - group set vector containing all parameters to set
+**
+** \return  None - this function puts any errors into the response message
+**
+**************************************************************************/
+void ProcessAllowPartialTrue_Expression(char *msg_id, Usp__SetResp *set_resp, set_expr_info_t *si, group_set_vector_t *gsv)
 {
     int err;
     dm_trans_vector_t trans;
-    
-    // Start a transaction here, if allow_partial is at the object level
-    if (allow_partial == true)
+    int num_params_in_expr;
+    int failure_index;
+
+    // Exit if this path expression failed to resolve, adding a failure response
+    if (si->err_code != USP_ERR_OK)
     {
-        // Return OperFailure, if failed to start a transaction
-        err = DM_TRANS_Start(&trans);
-        if (err != USP_ERR_OK)
-        {
-            AddSetResp_OperFailure(set_resp, up->obj_path, err, USP_ERR_GetMessage());
-            return err;
-        }
+        AddSetResp_OperFailure(set_resp, si->requested_path, si->err_code, si->err_msg);
+        return;
     }
 
-    // Update the specified object
-    err = UpdateObject(obj_path, set_resp, up);
-
-    // Commit/Abort transaction here, if allow_partial is at the object level
-    if (allow_partial == true)
+    // Exit if unable to start a transaction for this object, adding a failure response
+    err = DM_TRANS_Start(&trans);
+    if (err != USP_ERR_OK)
     {
-        if (err == USP_ERR_OK)
-        {
-            err = DM_TRANS_Commit();
-            if (err != USP_ERR_OK)
-            {
-                // If transaction failed, then replace the OperSuccess with OperFailure
-                // To do this, we remove the last OperSuccessObject from the USP message
-                RemoveSetResp_LastUpdateObjResult(set_resp);
-                AddSetResp_OperFailure(set_resp, up->obj_path, err, USP_ERR_GetMessage());
-            }
-        }
-        else
-        {
-            // Because allow_partial=true, we rollback the creation of this object, but do not fail the entire message
-            DM_TRANS_Abort();
-            err = USP_ERR_OK;                             
-        }
+        (void)AddSetResp_OperFailure(set_resp, si->requested_path, err, USP_ERR_GetMessage());
+        return;
     }
 
-    return err;
+    // Attempt to set all parameters in this expression
+    num_params_in_expr = si->resolved_objs.num_entries * si->num_params;
+    GROUP_SET_VECTOR_SetValues(gsv, si->index, num_params_in_expr);
+
+    // Exit if any of the required parameters failed to set
+    failure_index = GROUP_SET_VECTOR_GetFailureIndex(gsv, si->index, num_params_in_expr);
+    if (failure_index != INVALID)
+    {
+        DM_TRANS_Abort();
+        PopulateSetResp_OperFailure(set_resp, si, gsv);
+        return;
+    }
+
+    // Exit if failed to commit the changes, adding a failure response
+    err = DM_TRANS_Commit();
+    if (err != USP_ERR_OK)
+    {
+        (void)AddSetResp_OperFailure(set_resp, si->requested_path, err, USP_ERR_GetMessage());
+        return;
+    }
+
+    // If the code gets here, then all of the required parameters in all objects were set successfully
+    // So populate a success response for this data model object
+    PopulateSetResp_OperSuccess(set_resp, si, gsv);
 }
 
 /*********************************************************************//**
 **
-** UpdateObject
+** PopulateSetResp_OperFailure
 **
-** Updates all the objects of the specified path expressions
+** Adds an OperFailure to a SetResp object and populates it with UpdatedInstFailure objects
+** for each object which had required parameters that failed to set
 **
-** \param   obj_path - path to the object to update
-** \param   set_resp - USP Message OperationSuccess Object to add the result of the set to
-** \param   up - pointer to parsed USP UpdateObject message
+** \param   set_resp - pointer to set response message to populate
+** \param   si - pointer to set_expr_info describing the expression that failed
+** \param   gsv - group set vector containing all parameters to set that failed
 **
-** \return  USP_ERR_OK if successful
+** \return  None - this function puts any errors into the response message
 **
 **************************************************************************/
-int UpdateObject(char *obj_path, 
-                        Usp__SetResp *set_resp,
-                        Usp__Set__UpdateObject *up)
+void PopulateSetResp_OperFailure(Usp__SetResp *set_resp, set_expr_info_t *si, group_set_vector_t *gsv)
 {
-    int err;
     int i;
-    Usp__Set__UpdateParamSetting *ps;
-    Usp__SetResp__UpdatedObjectResult__OperationStatus__OperationSuccess *oper_success;
     Usp__SetResp__UpdatedObjectResult__OperationStatus__OperationFailure *oper_failure;
-    Usp__SetResp__UpdatedInstanceResult *updated_inst_res;
-    Usp__SetResp__UpdatedInstanceFailure *updated_inst_failure = NULL;
-    char full_path[MAX_DM_PATH];
-    int result;     // This stores the cumulative result of all sets
-                    // If we fail to set a required parameter, then this causes the code to switch from 
-                    // adding non-required failed parameters to the success message, to adding failed required 
-                    // parameters to the failure message
 
-    // Assume OperSuccess and add the UpdatedInstRes object
-    result = USP_ERR_OK;    // Assume that the cumulative result was successful
-    oper_success = AddSetResp_OperSuccess(set_resp, up->obj_path);
-    updated_inst_res = AddOperSuccess_UpdatedInstRes(oper_success, obj_path);
+    // Add an OperFailure to the SetResp
+    oper_failure = AddSetResp_OperFailure(set_resp, si->requested_path, USP_ERR_REQUIRED_PARAM_FAILED, "Failed to set required parameters");
 
-    // So iterate over all parameters, trying to set their values for this object
-    // NOTE: This code reports ** ALL ** failing required parameters
-    for (i=0; i < up->n_param_settings; i++)
+    // Add UpdatedInstFailure objects for all objects with required parameters that failed
+    for (i=0; i < si->resolved_objs.num_entries; i++)
     {
-        // Create the full path to the parameter
-        ps = up->param_settings[i];
-        USP_SNPRINTF(full_path, sizeof(full_path), "%s.%s", obj_path, ps->param);
-        full_path[sizeof(full_path)-1] = '\0';
+        PopulateOperFailure_UpdatedInstFailure(oper_failure, si, i, gsv);
+    }
+}
 
-        // Attempt to set the parameter
-        err = DATA_MODEL_SetParameterValue(full_path, ps->value, CHECK_WRITABLE);
-        if (err != USP_ERR_OK)
+/*********************************************************************//**
+**
+** PopulateOperFailure_UpdatedInstFailure
+**
+** Populates the OperFailure object with UpdatedInstFailure objects for the specified
+** data model object, if it had required parameters that failed to set
+**
+** \param   oper_failure - pointer to OperFailure object to add UpdatedInstFailure objects to
+** \param   si - pointer to set_expr_info describing the expression that failed
+** \param   obj_index - index of the object to process (in the resolved_objs vector)
+** \param   gsv - group set vector containing all parameters to set that failed
+**
+** \return  None - this function puts any errors into the response message
+**
+**************************************************************************/
+void PopulateOperFailure_UpdatedInstFailure(Usp__SetResp__UpdatedObjectResult__OperationStatus__OperationFailure *oper_failure, set_expr_info_t *si, int obj_index, group_set_vector_t *gsv)
+{
+    int i;
+    group_set_entry_t *gse;
+    int param_index;  // index of the first parameter to be set for this object in the group set vector
+    int failure_index;  // index of first required parameter which had an error in the group set vector
+    char *obj_path;
+    char *param_name;
+    Usp__SetResp__UpdatedInstanceFailure *updated_inst_failure;
+
+    // Exit if no required parameters failed for this object
+    // In this case, no UpdatedInstFailure is added to the OperFailure
+    param_index = si->index + obj_index*(si->num_params);
+    failure_index = GROUP_SET_VECTOR_GetFailureIndex(gsv, param_index, si->num_params);
+    if (failure_index == INVALID)
+    {
+        return;
+    }
+
+    // Add an UpdatedInstFailure object
+    obj_path = si->resolved_objs.vector[obj_index];
+    updated_inst_failure = AddOperFailure_UpdatedInstFailure(oper_failure, obj_path);
+
+    // Iterate over all parameters, adding all required parameters (that failed to set) as ParamErr objects
+    for (i=0; i < si->num_params; i++)
+    {
+        gse = &gsv->vector[param_index + i];
+        if ((gse->err_code != USP_ERR_OK) && (gse->is_required))
         {
-            // The parameter was not set successfully
-            if (ps->required)
+            param_name = si->param_settings[i]->param;
+            AddUpdatedInstFailure_ParamErr(updated_inst_failure, param_name, gse->err_code, gse->err_msg);
+        }
+    }
+}
+
+/*********************************************************************//**
+**
+** PopulateSetResp_OperSuccess
+**
+** Adds an OperSuccess to a SetResp object
+**
+** \param   set_resp - pointer to set response message to populate
+** \param   si - pointer to set_expr_info describing the expression that failed
+** \param   gsv - group set vector containing all parameters to set that failed
+**
+** \return  None - this function puts any errors into the response message
+**
+**************************************************************************/
+void PopulateSetResp_OperSuccess(Usp__SetResp *set_resp, set_expr_info_t *si, group_set_vector_t *gsv)
+{
+    int i, j;
+    char *obj_path;
+    int param_index;
+    char *param_name;
+    group_set_entry_t *gse;
+    Usp__SetResp__UpdatedObjectResult__OperationStatus__OperationSuccess *oper_success;
+    Usp__SetResp__UpdatedInstanceResult *updated_inst_res;
+
+    // Add an OperSuccess to the SetResp
+    oper_success = AddSetResp_OperSuccess(set_resp, si->requested_path);
+
+    // Iterate over all resolved objects for this expression
+    for (i=0; i < si->resolved_objs.num_entries; i++)
+    {
+        // Add an UpdatedInstResponse object for this resolved object
+        obj_path = si->resolved_objs.vector[i];
+        updated_inst_res = AddOperSuccess_UpdatedInstRes(oper_success, obj_path);
+
+        // Iterate over all parameters set in the resolved object
+        param_index = si->index + i*(si->num_params);
+        for (j=0; j < si->num_params; j++)
+        {
+            gse = &gsv->vector[param_index + j];
+            param_name = si->param_settings[j]->param;
+            if (gse->err_code == USP_ERR_OK)
             {
-                if (result == USP_ERR_OK)
-                {
-                    // This is the first required parameter which has failed to be set
-                    // So replace the OperSuccess with OperFailure
-                    // To do this, we remove the last OperSuccessObject from the USP message
-                    result = err;
-                    RemoveSetResp_LastUpdateObjResult(set_resp);
-                    oper_failure = AddSetResp_OperFailure(set_resp, up->obj_path, USP_ERR_REQUIRED_PARAM_FAILED, "Failed to set required parameters");
-                    updated_inst_failure = AddOperFailure_UpdatedInstFailure(oper_failure, obj_path);
-                    AddUpdatedInstFailure_ParamErr(updated_inst_failure, ps->param, err, USP_ERR_GetMessage());
-                }
-                else
-                {
-                    // This is a subsequent required parameter which has failed to be set
-                    // So add it to the list of failed required parameters
-                    if (updated_inst_failure != NULL)  // NOTE: This test is not necessary because if result!=USP_ERR_OK, then updated_inst_failure will be set (last code block). However we leave this test in because using -O2, some compilers incorrectly think that the code can get here without updated_inst_failure being set.
-                    {
-                        AddUpdatedInstFailure_ParamErr(updated_inst_failure, ps->param, err, USP_ERR_GetMessage());
-                    }
-                }
+                // The parameter was set successfully, so add it to the ParamMap
+                AddUpdatedInstRes_ParamsEntry(updated_inst_res, param_name, gse->value);
             }
             else
             {
-                // This parameter failed to be set, but was not required
-                // So add it to the ParamErr list, if we have not encountered a fatal error
-                if (result == USP_ERR_OK)
-                {
-                    AddUpdatedInstRes_ParamErr(updated_inst_res, ps->param, err, USP_ERR_GetMessage());
-                }
-            }
-
-        }
-        else
-        {
-            // The parameter was set successfully, so add it to the ParamMap, if we have not encountered a fatal error
-            if (result == USP_ERR_OK)
-            {
-                AddUpdatedInstRes_ParamsEntry(updated_inst_res, ps->param, ps->value);
+                // The parameter failed to be set, but was not required, so add it to the ParamErr list
+                USP_ASSERT(gse->is_required == false);
+                AddUpdatedInstRes_ParamErr(updated_inst_res, param_name, gse->err_code, gse->err_msg);
             }
         }
     }
-
-    return result;
 }
+
+/*********************************************************************//**
+**
+** DestroySetExprInfo
+**
+** Frees all memory associated with the specified set expr info array
+**
+** \param   set_expr_info - pointer to array of set expr info structures
+** \param   num_set_expr - number of elements in the array
+**
+** \return  None
+**
+**************************************************************************/
+void DestroySetExprInfo(set_expr_info_t *set_expr_info, int num_set_expr)
+{
+    int i;
+    set_expr_info_t *si;
+
+    // Exit if the set expr info array was never allocated - nothing to do
+    if (set_expr_info == NULL)
+    {
+        return;
+    }
+
+    // Iterate over all elements of the array, freeing all dynamically allocated memory owned by the array
+    for (i=0; i<num_set_expr; i++)
+    {
+        si = &set_expr_info[i];
+        STR_VECTOR_Destroy(&si->resolved_objs);
+        USP_SAFE_FREE(si->err_msg);
+    }
+
+    // Since all memory owned by the array has been freed, free the array itself
+    USP_FREE(set_expr_info);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /*********************************************************************//**
 **
@@ -460,7 +795,7 @@ Usp__Msg *CreateSetResp(char *msg_id)
     set_resp->updated_obj_results = NULL;
 
     return resp;
-}    
+}
 
 /*********************************************************************//**
 **
@@ -484,13 +819,13 @@ AddSetResp_OperFailure(Usp__SetResp *set_resp, char *path, int err_code, char *e
     Usp__SetResp__UpdatedObjectResult__OperationStatus *oper_status;
     Usp__SetResp__UpdatedObjectResult__OperationStatus__OperationFailure *oper_failure;
     int new_num;    // new number of entries in the updated object result array
-    
+
     // Allocate memory to store the updated object result
     updated_obj_res = USP_MALLOC(sizeof(Usp__SetResp__UpdatedObjectResult));
     usp__set_resp__updated_object_result__init(updated_obj_res);
 
     oper_status = USP_MALLOC(sizeof(Usp__SetResp__UpdatedObjectResult__OperationStatus));
-    usp__set_resp__updated_object_result__operation_status__init(oper_status);    
+    usp__set_resp__updated_object_result__operation_status__init(oper_status);
 
     oper_failure = USP_MALLOC(sizeof(Usp__SetResp__UpdatedObjectResult__OperationStatus__OperationFailure));
     usp__set_resp__updated_object_result__operation_status__operation_failure__init(oper_failure);
@@ -599,106 +934,6 @@ AddUpdatedInstFailure_ParamErr(Usp__SetResp__UpdatedInstanceFailure *updated_ins
 
 /*********************************************************************//**
 **
-** ParamError_FromSetRespToErrResp
-**
-** Extracts the parameters in error from the OperFailure object of the SetResponse
-** and adds them as ParamError objects to an ErrResponse object if supplied.
-** If not supplied, it just counts the number of ParamError objects that would be added.
-**
-** \param   set_msg - pointer to SetResponse object
-** \param   err_msg - pointer to ErrResponse object. If NULL, this indicates that the purpose of this function is just
-**                    to return the count of ParamErr objects that would be added
-**
-** \return  Number of ParamErr objects that were (or would be) added to an ErrResponse
-**
-**************************************************************************/
-int ParamError_FromSetRespToErrResp(Usp__Msg *set_msg, Usp__Msg *err_msg)
-{
-    Usp__Body *body;
-    Usp__Response *response;
-    Usp__SetResp *set_resp;
-    Usp__SetResp__UpdatedObjectResult *updated_obj_res;
-    Usp__SetResp__UpdatedObjectResult__OperationStatus *oper_status;
-    Usp__SetResp__UpdatedObjectResult__OperationStatus__OperationFailure *oper_failure;
-    Usp__SetResp__UpdatedInstanceFailure *updated_inst_failure;
-    Usp__SetResp__ParameterError *param_err_entry;
-
-    int i, j, k;
-    int num_objs;
-    int num_failures;
-    int num_params;
-    int count = 0;
-
-    char path[MAX_DM_PATH];
-    int offset;
-    int err_code;
-    char *err_str;
-
-    // Navigate to the SetResponse object within the AddResponse message
-    body = set_msg->body;
-    USP_ASSERT(body != NULL);
-
-    response = body->response;
-    USP_ASSERT(response != NULL);
-
-    set_resp = response->set_resp;
-    USP_ASSERT(set_resp != NULL);
-
-    // Iterate over all object failures
-    num_objs = set_resp->n_updated_obj_results;
-    for (i=0; i < num_objs; i++)
-    {
-        updated_obj_res = set_resp->updated_obj_results[i];
-        USP_ASSERT(updated_obj_res != NULL);
-        
-        oper_status = updated_obj_res->oper_status;
-        USP_ASSERT(oper_status != NULL);
-        
-        // Convert an OperFailure object
-        if (oper_status->oper_status_case == USP__SET_RESP__UPDATED_OBJECT_RESULT__OPERATION_STATUS__OPER_STATUS_OPER_FAILURE)
-        {
-            oper_failure = oper_status->oper_failure;
-            USP_ASSERT(oper_failure != NULL);
-
-            // Iterate over all updated_inst_failure objects
-            num_failures = oper_failure->n_updated_inst_failures;
-            for (j=0; j<num_failures; j++)
-            {
-                updated_inst_failure = oper_failure->updated_inst_failures[j];
-                USP_ASSERT(updated_inst_failure != NULL);
-
-                // Copy the object path into path[] array. Each Param error will update this
-                USP_STRNCPY(path, updated_inst_failure->affected_path, sizeof(path));
-                offset = strlen(path);
-
-                num_params = updated_inst_failure->n_param_errs;
-                for (k=0; k<num_params; k++)
-                {
-                    if (err_msg != NULL)
-                    {
-                        param_err_entry = updated_inst_failure->param_errs[k];
-                        USP_ASSERT(param_err_entry != NULL);
-    
-                        // Extract the ParamError fields (forming the full parameter path)
-                        USP_STRNCPY(&path[offset], param_err_entry->param, sizeof(path)-offset);
-                        err_code = param_err_entry->err_code;
-                        err_str = param_err_entry->err_msg;
-
-                        ERROR_RESP_AddParamError(err_msg, path, err_code, err_str);
-                    }
-
-                    // Increment the number of param err fields
-                    count++;
-                }
-            }
-        }
-    }
-
-    return count;
-}
-
-/*********************************************************************//**
-**
 ** AddSetResp_OperSuccess
 **
 ** Dynamically adds an operation success object to the SetResponse object
@@ -717,14 +952,14 @@ AddSetResp_OperSuccess(Usp__SetResp *set_resp, char *path)
     Usp__SetResp__UpdatedObjectResult__OperationStatus *oper_status;
     Usp__SetResp__UpdatedObjectResult__OperationStatus__OperationSuccess *oper_success;
     int new_num;    // new number of entries in the updated object result array
-    
+
     // Allocate memory to store the updated object result
     updated_obj_res = USP_MALLOC(sizeof(Usp__SetResp__UpdatedObjectResult));
     usp__set_resp__updated_object_result__init(updated_obj_res);
 
     oper_status = USP_MALLOC(sizeof(Usp__SetResp__UpdatedObjectResult__OperationStatus));
-    usp__set_resp__updated_object_result__operation_status__init(oper_status);    
-    
+    usp__set_resp__updated_object_result__operation_status__init(oper_status);
+
     oper_success = USP_MALLOC(sizeof(Usp__SetResp__UpdatedObjectResult__OperationStatus__OperationSuccess));
     usp__set_resp__updated_object_result__operation_status__operation_success__init(oper_success);
 
@@ -745,33 +980,6 @@ AddSetResp_OperSuccess(Usp__SetResp *set_resp, char *path)
     oper_success->updated_inst_results = NULL;
 
     return oper_success;
-}
-
-/*********************************************************************//**
-**
-** RemoveSetResp_LastUpdateObjResult
-**
-** Removes the last UpdateObjResult object from the SetResp object
-** The UpdateObjResult object will contain either an OperSuccess or an OperFailure
-**
-** \param   set_resp - pointer to set response object to modify
-**
-** \return  None
-**
-**************************************************************************/
-void RemoveSetResp_LastUpdateObjResult(Usp__SetResp *set_resp)
-{
-    int index;
-    Usp__SetResp__UpdatedObjectResult *updated_obj_res;
-
-    // Free the memory associated with the last updated obj_result
-    index = set_resp->n_updated_obj_results - 1;
-    updated_obj_res = set_resp->updated_obj_results[index];
-    protobuf_c_message_free_unpacked ((ProtobufCMessage*)updated_obj_res, pbuf_allocator);
-
-    // Fix the SetResp object, so that it does not reference the obj_result we have just removed
-    set_resp->updated_obj_results[index] = NULL;
-    set_resp->n_updated_obj_results--;
 }
 
 /*********************************************************************//**

@@ -1,33 +1,33 @@
 /*
  *
- * Copyright (C) 2019, Broadband Forum
- * Copyright (C) 2016-2019  CommScope, Inc
- * 
+ * Copyright (C) 2019-2021, Broadband Forum
+ * Copyright (C) 2016-2021  CommScope, Inc
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
- * 
+ *
  * 1. Redistributions of source code must retain the above copyright
  *    notice, this list of conditions and the following disclaimer.
- * 
+ *
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 
+ *
  * 3. Neither the name of the copyright holder nor the names of its
  *    contributors may be used to endorse or promote products derived from
  *    this software without specific prior written permission.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
  * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR 
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF 
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
  * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
  * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF 
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
  * THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
@@ -62,12 +62,20 @@ typedef struct
 } kv_vector_t;
 
 //-----------------------------------------------------------------------------------------
-// Fixed-sized vector containing instance numbers
+// Vector containing instance numbers
 typedef struct
 {
-    short vector[MAX_DM_INSTANCES];
+    int *vector;
     int num_entries;
 } int_vector_t;
+
+//-------------------------------------------------------------------------
+// Structure used for tables to convert from a string to an enumeration
+typedef struct
+{
+    int value;
+    char *name;
+} enum_entry_t;
 
 //-------------------------------------------------------------------------
 // Enumeration of expression operators
@@ -157,33 +165,6 @@ typedef enum
 #define val_uint      req->val_union.value_uint
 #define val_ulong     req->val_union.value_ulong
 
-//------------------------------------------------------------------------------------
-// Enumeration for Device.DeviceInfo.FirmwareImage.{i}.Status
-typedef enum
-{
-    kFirmwareStatus_NoImage = 0,
-    kFirmwareStatus_Downloading = 1,
-    kFirmwareStatus_Validating = 2,
-    kFirmwareStatus_Available = 3,
-    kFirmwareStatus_DownloadFailed = 4,
-    kFirmwareStatus_ValidationFailed = 5,
-    kFirmwareStatus_InstallationFailed = 6,
-    kFirmwareStatus_ActivationFailed = 7,
-} firmware_status_t;
-
-//------------------------------------------------------------------------------
-// Enumeration for SHA algorithm types used by Device.DeviceInfo.FirmwareImage.{i}.Download() operation
-// NOTE: If this enumeration is changed, please also update sha_alg_strings[]
-typedef enum
-{
-    kShaAlg_NoneSpecified,
-
-    kShaAlg_1,          // SHA-1
-    kShaAlg_224,        // SHA-2 224 bit
-    kShaAlg_256,        // SHA-2 256 bit
-    kShaAlg_384,        // SHA-2 384 bit
-    kShaAlg_512,        // SHA-2 512 bit
-} sha_alg_t;
 
 //------------------------------------------------------------------------------
 // Bits in bitmask defining permissions. If the bit is set, then the permission is granted
@@ -226,36 +207,6 @@ typedef struct
     int key_len;
 } agent_cert_info_t;
 
-//------------------------------------------------------------------------------
-// Structure for Download() operation input conditions (ie arguments)
-typedef struct
-{
-    int request_instance;   // Instance number of this operation in the Device.LocalAgent.Request table
-    char originator[MAX_DM_PATH]; // Data model path of the controller that initiated this operation
-    int firmware_slot;      // Firmware slot number to download into. This value is 'i' in Device.DeviceInfo.FirmwareImage.{i}
-
-    char command_key[256];  // The command key comes from the Operate() USP message, rather than being a download input arg
-    char url[256];
-    char username[128];
-    char password[128];
-    unsigned file_size;
-    bool auto_activate;     // If set, the download operation also activates the image and reboots.
-
-    sha_alg_t   sha_alg;
-    unsigned char sha_sum[512/8];        // SHA-2 is up to 512 bit
-    int sha_sum_size;
-    
-} download_input_cond_t;
-
-//-------------------------------------------------------------------------
-// Enumeration representing when the CPE is permitted to activate the firmware image
-typedef enum
-{
-    kActivateMode_AnyTime,
-    kActivateMode_Immediately,
-    kActivateMode_WhenIdle,
-    kActivateMode_ConfirmationNeeded,
-} activate_mode_t;
 
 //-------------------------------------------------------------------------
 // Typedefs for data model callback functions
@@ -276,6 +227,13 @@ typedef int (*dm_notify_del_cb_t)(dm_req_t *req);
 typedef int (*dm_sync_oper_cb_t)(dm_req_t *req, char *command_key, kv_vector_t *input_args, kv_vector_t *output_args);
 typedef int (*dm_async_oper_cb_t)(dm_req_t *req, kv_vector_t *input_args, int instance);
 typedef int (*dm_async_restart_cb_t)(dm_req_t *req, int instance, bool *is_restart, int *err_code, char *err_msg, int err_msg_len, kv_vector_t *output_args);
+
+typedef int (*dm_get_group_cb_t)(int group_id, kv_vector_t *params);
+typedef int (*dm_set_group_cb_t)(int group_id, kv_vector_t *params, unsigned *types, int *failure_index);
+typedef int (*dm_add_group_cb_t)(int group_id, char *path, int *instance);
+typedef int (*dm_del_group_cb_t)(int group_id, char *path);
+typedef int (*dm_refresh_instances_cb_t)(int group_id, char *path, int *expiry_period);
+
 
 //-------------------------------------------------------------------------
 // Typedefs for core vendor hook callbacks
@@ -319,7 +277,7 @@ typedef int (*get_hardware_version_cb_t)(char *buf, int len);
 typedef unsigned long long (*stats_collection_enable_cb_t)(bool enable, char *interface_name);
 typedef int (*dm_vendor_get_mtp_password_cb_t)(int instance, char *buf, int len);
 typedef int (*load_agent_cert_cb_t)(SSL_CTX *ctx);
-typedef void (*log_message_cb_t)(char *buf);
+typedef void (*log_message_cb_t)(const char *buf);
 
 //-------------------------------------------------------------------------
 // Typedef for structure containing core vendor hook callbacks
@@ -367,12 +325,13 @@ typedef struct
 // Functions to register the data model
 // These functions may only be called during startup (which for vendor code, means within VENDOR_Init())
 int USP_REGISTER_Param_Constant(char *path, char *value, unsigned type_flags);
+int USP_REGISTER_Param_SupportedList(char *path, const enum_entry_t *enums, int num_enums);
 int USP_REGISTER_DBParam_ReadWrite(char *path, char *value, dm_validate_value_cb_t validator_cb, dm_notify_set_cb_t notify_set_cb, unsigned type_flags);
 int USP_REGISTER_Param_NumEntries(char *path, char *table_path);
 int USP_REGISTER_VendorParam_ReadOnly(char *path, dm_get_value_cb_t get_cb, unsigned type_flags);
 int USP_REGISTER_VendorParam_ReadWrite(char *path, dm_get_value_cb_t get_cb, dm_set_value_cb_t set_cb, dm_notify_set_cb_t notify_set_cb, unsigned type_flags);
 int USP_REGISTER_DBParam_ReadOnlyAuto(char *path, dm_get_value_cb_t get_cb, unsigned type_flags);
-int USP_REGISTER_DBParam_ReadWriteAuto(char *path, dm_get_value_cb_t get_cb, dm_validate_value_cb_t validator_cb, 
+int USP_REGISTER_DBParam_ReadWriteAuto(char *path, dm_get_value_cb_t get_cb, dm_validate_value_cb_t validator_cb,
                                       dm_notify_set_cb_t notify_set_cb, unsigned type_flags);
 int USP_REGISTER_DBParam_Alias(char *path, dm_notify_set_cb_t notify_set_cb);
 int USP_REGISTER_DBParam_ReadOnly(char *path, char *value, unsigned type_flags);
@@ -387,17 +346,25 @@ int USP_REGISTER_Event(char *path);
 int USP_REGISTER_EventArguments(char *path, char **event_arg_names, int num_event_arg_names);
 int USP_REGISTER_CoreVendorHooks(vendor_hook_cb_t *callbacks);
 
+int USP_REGISTER_GroupedObject(int group_id, char *path, bool is_writable);
+int USP_REGISTER_GroupedVendorParam_ReadOnly(int group_id, char *path, unsigned type_flags);
+int USP_REGISTER_GroupedVendorParam_ReadWrite(int group_id, char *path, unsigned type_flags);
+int USP_REGISTER_GroupVendorHooks(int group_id, dm_get_group_cb_t get_group_cb, dm_set_group_cb_t set_group_cb,
+                                                dm_add_group_cb_t add_group_cb, dm_del_group_cb_t del_group_cb);
+int USP_REGISTER_Object_RefreshInstances(char *path, dm_refresh_instances_cb_t refresh_instances_cb);
+
 //------------------------------------------------------------------------------
 // Functions that may be called from vendor hooks to access the data model
 // These functions must not be called from any thread other than the data model thread
-// If you need to access a data model parameter from another thread, then it must be implemented as a vendor parameter
 int USP_DM_GetParameterValue(char *path, char *buf, int len);
 int USP_DM_SetParameterValue(char *path, char *new_value);
 int USP_DM_DeleteInstance(char *path);
 int USP_DM_InformInstance(char *path);
-int USP_DM_GetInstances(char *path, int_vector_t *iv);
+int USP_DM_RefreshInstance(char *path);
+int USP_DM_GetInstances(char *path, int *vector, int max_entries, int *num_entries);
 int USP_DM_RegisterRoleName(ctrust_role_t role, char *name);
 int USP_DM_AddControllerTrustPermission(ctrust_role_t role, char *path, unsigned short permission_bitmask);
+int USP_DM_InformDataModelEvent(char *event_name, kv_vector_t *output_args);
 
 //------------------------------------------------------------------------------
 // Functions that may be called from a thread implementing an asynchronous operation
@@ -409,15 +376,20 @@ int USP_SIGNAL_ObjectDeleted(char *path);
 
 //------------------------------------------------------------------------------
 // Functions for argument list data structure
+#define SAVED_TIME_REF_ARG_NAME "Internal_TimeRef"
 kv_vector_t * USP_ARG_Create(void);
 void USP_ARG_Init(kv_vector_t *kvv);
 void USP_ARG_Add(kv_vector_t *kvv, char *key, char *value);
+bool USP_ARG_Replace(kv_vector_t *kvv, char *key, char *value);
+bool USP_ARG_ReplaceWithHint(kv_vector_t *kvv, char *key, char *value, int hint);
 void USP_ARG_AddUnsigned(kv_vector_t *kvv, char *key, unsigned value);
 void USP_ARG_AddBool(kv_vector_t *kvv, char *key, bool value);
 void USP_ARG_AddDateTime(kv_vector_t *kvv, char *key, time_t value);
 char *USP_ARG_Get(kv_vector_t *kvv, char *key, char *default_value);
 int USP_ARG_GetUnsigned(kv_vector_t *kvv, char *key, unsigned default_value, unsigned *value);
 int USP_ARG_GetUnsignedWithinRange(kv_vector_t *kvv, char *key, unsigned default_value, unsigned min, unsigned max, unsigned *value);
+int USP_ARG_GetInt(kv_vector_t *kvv, char *key, int default_value, int *value);
+int USP_ARG_GetIntWithinRange(kv_vector_t *kvv, char *key, int default_value, int min, int max, int *value);
 int USP_ARG_GetBool(kv_vector_t *kvv, char *key, bool default_value, bool *value);
 int USP_ARG_GetDateTime(kv_vector_t *kvv, char *key, char *default_value, time_t *value);
 void USP_ARG_Destroy(kv_vector_t *kvv);
@@ -438,9 +410,5 @@ void USP_ERR_SetMessage(char *fmt, ...)   __attribute__((format(printf, 1, 2)));
 int USP_HOOK_DenyAddInstance(dm_req_t *req);
 int USP_HOOK_DenyDeleteInstance(dm_req_t *req);
 
-#ifdef ENABLE_HIDL
-// Include the HIDL vendor hook functions, if required
-#include "hidl_server.h"
-#endif
 
 #endif

@@ -1,33 +1,33 @@
 /*
  *
- * Copyright (C) 2019, Broadband Forum
- * Copyright (C) 2016-2019  CommScope, Inc
- * 
+ * Copyright (C) 2019-2021, Broadband Forum
+ * Copyright (C) 2016-2021  CommScope, Inc
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
- * 
+ *
  * 1. Redistributions of source code must retain the above copyright
  *    notice, this list of conditions and the following disclaimer.
- * 
+ *
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 
+ *
  * 3. Neither the name of the copyright holder nor the names of its
  *    contributors may be used to endorse or promote products derived from
  *    this software without specific prior written permission.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
  * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR 
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF 
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
  * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
  * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF 
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
  * THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
@@ -64,6 +64,8 @@
 #include "text_utils.h"
 #include "version.h"
 #include "stomp.h"
+#include "group_get_vector.h"
+#include "bdc_exec.h"
 
 //------------------------------------------------------------------------------
 // Forward declarations. Note these are not static, because we need them in the symbol table for USP_LOG_Callstack() to show them
@@ -78,6 +80,7 @@ int ExecuteCli_Set(char *arg1, char *arg2, char *usage);
 int ExecuteCli_Add(char *arg1, char *arg2, char *usage);
 int ExecuteCli_Del(char *arg1, char *arg2, char *usage);
 int ExecuteCli_Operate(char *arg1, char *arg2, char *usage);
+int ExecuteCli_Event(char *arg1, char *arg2, char *usage);
 int ExecuteCli_GetInstances(char *arg1, char *arg2, char *usage);
 int ExecuteCli_Show(char *arg1, char *arg2, char *usage);
 int ExecuteCli_Dump(char *arg1, char *arg2, char *usage);
@@ -123,7 +126,7 @@ typedef struct
     char *usage;
 } cli_cmd_t;
 
-cli_cmd_t cli_commands[] = 
+cli_cmd_t cli_commands[] =
 {
 //    Name    NumArgs  RunLocal?  Exec callback     Usage String
     { "help",    0, RUN_LOCALLY,  ExecuteCli_Help,  "help" },
@@ -133,6 +136,7 @@ cli_cmd_t cli_commands[] =
     { "add",     1, RUN_REMOTELY, ExecuteCli_Add,   "add [object]"},
     { "del",     1, RUN_REMOTELY, ExecuteCli_Del,   "del [path-expr]"},
     { "operate", 1, RUN_REMOTELY, ExecuteCli_Operate,"operate [operation]"},
+    { "event",   1, RUN_REMOTELY, ExecuteCli_Event, "event [event]"},
     { "instances", 1, RUN_REMOTELY, ExecuteCli_GetInstances,   "instances [path-expr]" },
     { "show",    1, RUN_LOCALLY,  ExecuteCli_Show,  "show ['datamodel' | 'database' ]"},
     { "dump",    1, RUN_REMOTELY, ExecuteCli_Dump,  "dump ['memory' | 'mdelta' | 'subscriptions' | 'instances' ]"},
@@ -336,7 +340,7 @@ void CLI_SERVER_ProcessSocketActivity(socket_set_t *set)
 ** \return  None
 **
 **************************************************************************/
-void CLI_SERVER_SendResponse(char *s)
+void CLI_SERVER_SendResponse(const char *s)
 {
     if (dump_to_cli)
     {
@@ -371,7 +375,7 @@ bool CLI_SERVER_IsCmdRunLocally(char *command)
         if (strcmp(command, cli_cmd->name)==0)
         {
             return cli_cmd->run_locally;
-        } 
+        }
     }
 
     // If the code gets here, then the command was not found, so handle it locally
@@ -429,16 +433,16 @@ int CLI_SERVER_ExecuteCliCommand(char *command)
                 dump_to_cli = false;
                 return err;
             }
-            
+
             // Process command
             err = cli_cmd->exec_cmd(arg1, arg2, cli_cmd->usage);
             dump_to_cli = false;
             return err;
-        } 
+        }
     }
 
     // If the code gets here, then the command was not found
-    // The code should only get here on the CLI client, as unknown commands are always 
+    // The code should only get here on the CLI client, as unknown commands are always
     // passed to the client by CLI_SERVER_IsCmdRunLocally()
     SendCliResponse("ERROR: Unknown command: %s\n", command);
     ExecuteCli_Help(NULL, NULL, NULL);
@@ -597,7 +601,7 @@ void RemoveSeparators(char *buf)
         // Replace separator with a space
         if (*p == CLI_SEPARATOR)
         {
-            *p = ' ';   
+            *p = ' ';
         }
         p++;
     }
@@ -670,39 +674,52 @@ int ExecuteCli_Get(char *arg1, char *arg2, char *usage)
 {
     int i;
     int err;
-    str_vector_t parameters;
-    char value[MAX_DM_VALUE_LEN];
-    char *param;
+    str_vector_t params;
+    int_vector_t group_ids;
+    group_get_vector_t ggv;
+    group_get_entry_t *gge;
 
     // Exit if unable to get a list of all parameters referenced by the expression
-    STR_VECTOR_Init(&parameters);
-    err = PATH_RESOLVER_ResolvePath(arg1, &parameters, kResolveOp_Get, NULL, INTERNAL_ROLE, 0);
+    STR_VECTOR_Init(&params);
+    INT_VECTOR_Init(&group_ids);
+    err = PATH_RESOLVER_ResolvePath(arg1, &params, &group_ids, kResolveOp_Get, NULL, INTERNAL_ROLE, 0);
     if (err != USP_ERR_OK)
     {
-        goto exit;
+        STR_VECTOR_Destroy(&params);
+        INT_VECTOR_Destroy(&group_ids);
+        return err;
     }
 
-    // Iterate over all parameters to get
+    // Form the group get vector
+    GROUP_GET_VECTOR_Init(&ggv);
+    GROUP_GET_VECTOR_AddParams(&ggv, &params, &group_ids);
+
+    // Destroy the params and group_ids vectors (since their contents have been moved to the group get vector)
+    USP_SAFE_FREE(params.vector);
+    INT_VECTOR_Destroy(&group_ids);
+
+    // Get the values of all the parameters
+    GROUP_GET_VECTOR_GetValues(&ggv);
+
+    // Print out the values of all parameters retrieved
     // NOTE: If a parameter is secure, then this will retrieve an empty string
-    for (i=0; i < parameters.num_entries; i++)
+    for (i=0; i < ggv.num_entries; i++)
     {
-        // Get the value of the specified parameter
-        param = parameters.vector[i];
-        err = DATA_MODEL_GetParameterValue(param, value, sizeof(value), 0);
-        if (err != USP_ERR_OK)
+        gge = &ggv.vector[i];
+        if (gge->err_code == USP_ERR_OK)
         {
-            goto exit;
+            USP_ASSERT(gge->value != NULL);
+            SendCliResponse("%s => %s\n", gge->path, gge->value);
         }
-    
-        // Since successful, send back the value of the parameter
-        SendCliResponse("%s => %s\n", param, value);
+        else
+        {
+            SendCliResponse("ERROR: %d retrieving %s (%s)\n", gge->err_code, gge->path, gge->err_msg);
+        }
     }
 
-    err = USP_ERR_OK;
+    GROUP_GET_VECTOR_Destroy(&ggv);
 
-exit:
-    STR_VECTOR_Destroy(&parameters);
-    return err;
+    return USP_ERR_OK;
 }
 
 /*********************************************************************//**
@@ -727,7 +744,7 @@ int ExecuteCli_Set(char *arg1, char *arg2, char *usage)
     str_vector_t objects;
     char param_name[MAX_DM_PATH];
     char search_path[MAX_DM_PATH];
-    
+
     STR_VECTOR_Init(&objects);
 
     // Exit if unable to split the set expression into search path and parameter name
@@ -739,7 +756,7 @@ int ExecuteCli_Set(char *arg1, char *arg2, char *usage)
     }
 
     // Exit if unable to get a list of all objects referenced by the expression
-    err = PATH_RESOLVER_ResolvePath(search_path, &objects, kResolveOp_Set, NULL, INTERNAL_ROLE, 0);
+    err = PATH_RESOLVER_ResolvePath(search_path, &objects, NULL, kResolveOp_Set, NULL, INTERNAL_ROLE, 0);
     if (err != USP_ERR_OK)
     {
         goto exit;
@@ -814,15 +831,17 @@ int ExecuteCli_Add(char *arg1, char *arg2, char *usage)
     char *instance_str;
     char *search_path;
     int instance_number;
+    kv_vector_t unique_key_params;
 
     // Split the object to add, into search path and (if one exists) instance number
     // NOTE: Trailing instance numbers may only be used on paths that do not contain complex search expressions
+    KV_VECTOR_Init(&unique_key_params);
     STR_VECTOR_Init(&objects);
     instance_str = SplitOffTrailingNumber(arg1);
     search_path = arg1;
 
     // Exit if unable to get a list of all objects referenced by the expression
-    err = PATH_RESOLVER_ResolvePath(search_path, &objects, kResolveOp_Add, NULL, INTERNAL_ROLE, 0);
+    err = PATH_RESOLVER_ResolvePath(search_path, &objects, NULL, kResolveOp_Add, NULL, INTERNAL_ROLE, 0);
     if (err != USP_ERR_OK)
     {
         goto exit;
@@ -861,7 +880,25 @@ int ExecuteCli_Add(char *arg1, char *arg2, char *usage)
                 DM_TRANS_Abort();
                 goto exit;
             }
+            USP_SNPRINTF(path, sizeof(path), "%s.%d", objects.vector[i], instance_number);
         }
+
+        // Exit if unable to retrieve the parameters used as unique keys for this object
+        err = DATA_MODEL_GetUniqueKeyParams(path, &unique_key_params, INTERNAL_ROLE);
+        if (err != USP_ERR_OK)
+        {
+            DM_TRANS_Abort();
+            goto exit;
+        }
+
+        // Exit if any unique keys have been left with a default value which is not unique
+        err = DATA_MODEL_ValidateDefaultedUniqueKeys(path, &unique_key_params, NULL);
+        if (err != USP_ERR_OK)
+        {
+            DM_TRANS_Abort();
+            goto exit;
+        }
+
     }
 
     // Exit if unable to commit the transaction
@@ -887,6 +924,7 @@ int ExecuteCli_Add(char *arg1, char *arg2, char *usage)
     err = USP_ERR_OK;
 
 exit:
+    KV_VECTOR_Destroy(&unique_key_params);
     STR_VECTOR_Destroy(&objects);
     return err;
 }
@@ -914,7 +952,7 @@ int ExecuteCli_Del(char *arg1, char *arg2, char *usage)
     STR_VECTOR_Init(&objects);
 
     // Exit if unable to get a list of all objects referenced by the expression
-    err = PATH_RESOLVER_ResolvePath(arg1, &objects, kResolveOp_Del, NULL, INTERNAL_ROLE, 0);
+    err = PATH_RESOLVER_ResolvePath(arg1, &objects, NULL, kResolveOp_Del, NULL, INTERNAL_ROLE, 0);
     if (err != USP_ERR_OK)
     {
         goto exit;
@@ -1002,7 +1040,7 @@ int ExecuteCli_Operate(char *arg1, char *arg2, char *usage)
         err = USP_ERR_INVALID_ARGUMENTS;
         goto exit;
     }
-    
+
     // Exit if argument does not contain a closing bracket
     bracket_end = TEXT_UTILS_StrStr(bracket_start, ")");
     if (bracket_end == NULL)
@@ -1012,7 +1050,7 @@ int ExecuteCli_Operate(char *arg1, char *arg2, char *usage)
         goto exit;
     }
 
-    // Split off the input arguments for the operation    
+    // Split off the input arguments for the operation
     *bracket_start = '\0';
     *bracket_end= '\0';
     USP_SNPRINTF(path, sizeof(path), "%s()", arg1);
@@ -1028,7 +1066,7 @@ int ExecuteCli_Operate(char *arg1, char *arg2, char *usage)
     EXPR_VECTOR_ToKeyValueVector(&temp_ev, &input_args);
 
     // Exit if unable to get a list of all operations referenced by the expression
-    err = PATH_RESOLVER_ResolvePath(path, &operations, kResolveOp_Oper, NULL, INTERNAL_ROLE, 0);
+    err = PATH_RESOLVER_ResolvePath(path, &operations, NULL, kResolveOp_Oper, NULL, INTERNAL_ROLE, 0);
     if (err != USP_ERR_OK)
     {
         goto exit;
@@ -1099,6 +1137,100 @@ exit:
 
 /*********************************************************************//**
 **
+** ExecuteCli_Event
+**
+** Executes the event CLI command
+** NOTE: A subscription must be in place for the event to be sent
+**
+** \param   arg1 - event (and args) to emit
+** \param   arg2 - unused
+** \param   usage - pointer to string containing usage info for this command
+**
+** \return  USP_ERR_OK if successful
+**
+**************************************************************************/
+int ExecuteCli_Event(char *arg1, char *arg2, char *usage)
+{
+    int i;
+    int err;
+    str_vector_t events;
+    kv_vector_t args;
+    char *bracket_start;
+    char *bracket_end;
+    char *pling;
+    expr_op_t valid_ops[] = {kExprOp_Equals};
+    expr_vector_t temp_ev;
+
+    // Initialise all vectors used by this function
+    KV_VECTOR_Init(&args);
+    EXPR_VECTOR_Init(&temp_ev);
+    STR_VECTOR_Init(&events);
+
+    // Exit if argument does not contain an exclamation mark
+    pling = TEXT_UTILS_StrStr(arg1, "!");
+    if (pling == NULL)
+    {
+        SendCliResponse("Missing exclamation mark in event name\n");
+        err = USP_ERR_INVALID_ARGUMENTS;
+        goto exit;
+    }
+
+    // Skip extracting arguments if none supplied
+    bracket_start = TEXT_UTILS_StrStr(arg1, "(");
+    if (bracket_start == NULL)
+    {
+        goto resolved;
+    }
+
+    // Exit if closing bracket is not present
+    bracket_end = TEXT_UTILS_StrStr(bracket_start, ")");
+    if (bracket_end == NULL)
+    {
+        SendCliResponse("Missing closing bracket around the arguments\n");
+        err = USP_ERR_INVALID_ARGUMENTS;
+        goto exit;
+    }
+
+    // Split off the arguments for the operation
+    *bracket_start = '\0';
+    *bracket_end= '\0';
+
+    // Exit if unable to extract the args into a temporary expression vector
+    err = EXPR_VECTOR_SplitExpressions(&bracket_start[1], &temp_ev, ",", valid_ops, NUM_ELEM(valid_ops), EXPR_FROM_CLI);
+    if (err != USP_ERR_OK)
+    {
+        goto exit;
+    }
+
+    // Convert the expression vector to a key-value vector, destroying the expression vector
+    EXPR_VECTOR_ToKeyValueVector(&temp_ev, &args);
+
+resolved:
+    // Exit if unable to get a list of all events referenced by the expression
+    err = PATH_RESOLVER_ResolvePath(arg1, &events, NULL, kResolveOp_Event, NULL, INTERNAL_ROLE, 0);
+    if (err != USP_ERR_OK)
+    {
+        goto exit;
+    }
+
+    // Iterate over all events to operate on
+    for (i=0; i < events.num_entries; i++)
+    {
+        SendCliResponse("Event (%s) being signalled\n", events.vector[i]);
+        DEVICE_SUBSCRIPTION_ProcessAllEventCompleteSubscriptions(events.vector[i], &args);
+    }
+
+    err = USP_ERR_OK;
+
+exit:
+    KV_VECTOR_Destroy(&args);
+    STR_VECTOR_Destroy(&events);
+    EXPR_VECTOR_Destroy(&temp_ev);
+    return err;
+}
+
+/*********************************************************************//**
+**
 ** ExecuteCli_GetInstances
 **
 ** Executes the get instances CLI command
@@ -1118,7 +1250,7 @@ int ExecuteCli_GetInstances(char *arg1, char *arg2, char *usage)
 
     // Exit if unable to get a list of all parameters referenced by the expression
     STR_VECTOR_Init(&obj_paths);
-    err = PATH_RESOLVER_ResolvePath(arg1, &obj_paths, kResolveOp_Instances, NULL, INTERNAL_ROLE, GET_ALL_INSTANCES);
+    err = PATH_RESOLVER_ResolvePath(arg1, &obj_paths, NULL, kResolveOp_Instances, NULL, INTERNAL_ROLE, GET_ALL_INSTANCES);
     if (err != USP_ERR_OK)
     {
         goto exit;
@@ -1267,23 +1399,23 @@ int ExecuteCli_Perm(char *arg1, char *arg2, char *usage)
         {
             goto exit;
         }
-    
+
         // Since successful, send back the permissions for the parameter
         #define PERMISSION_CHAR(bitmask, c, mask) ( ((bitmask & mask) == 0) ? '-' : c )
-        SendCliResponse("%s role: Param(%c%c-%c) Obj(%c%c-%c) InstantiatedObj (%c%c-%c) CommandEvent(%c-%c%c)\n", 
+        SendCliResponse("%s role: Param(%c%c-%c) Obj(%c%c-%c) InstantiatedObj (%c%c-%c) CommandEvent(%c-%c%c)\n",
                          value,
                          PERMISSION_CHAR(perm, 'r', PERMIT_GET),
                          PERMISSION_CHAR(perm, 'w', PERMIT_SET),
                          PERMISSION_CHAR(perm, 'n', PERMIT_SUBS_VAL_CHANGE),
-    
+
                          PERMISSION_CHAR(perm, 'r', PERMIT_OBJ_INFO),
                          PERMISSION_CHAR(perm, 'w', PERMIT_ADD),
                          PERMISSION_CHAR(perm, 'n', PERMIT_SUBS_OBJ_ADD),
-    
+
                          PERMISSION_CHAR(perm, 'r', PERMIT_GET_INST),
                          PERMISSION_CHAR(perm, 'w', PERMIT_DEL),
                          PERMISSION_CHAR(perm, 'n', PERMIT_SUBS_OBJ_DEL),
-    
+
                          PERMISSION_CHAR(perm, 'r', PERMIT_CMD_INFO),
                          PERMISSION_CHAR(perm, 'x', PERMIT_OPER),
                          PERMISSION_CHAR(perm, 'n', PERMIT_SUBS_EVT_OPER_COMP) );
@@ -1315,7 +1447,7 @@ int ExecuteCli_DbGet(char *param, char *arg2, char *usage)
     char instances[MAX_DM_PATH];
     char value[MAX_DM_VALUE_LEN];
     unsigned path_flags;
-    
+
     // Exit if parameter path is incorrect
     err = DM_PRIV_FormDB_FromPath(param, &hash, instances, sizeof(instances));
     if (err != USP_ERR_OK)
@@ -1325,7 +1457,7 @@ int ExecuteCli_DbGet(char *param, char *arg2, char *usage)
 
     // Exit, not printing any value, if this parameter is obfuscated (eg containing a password)
     value[0] = '\0';
-    path_flags = DATA_MODEL_GetPathProperties(param, INTERNAL_ROLE, NULL);
+    path_flags = DATA_MODEL_GetPathProperties(param, INTERNAL_ROLE, NULL, NULL, NULL);
     if (path_flags & PP_IS_SECURE_PARAM)
     {
         goto exit;
@@ -1395,7 +1527,7 @@ int ExecuteCli_DbDel(char *param, char *arg2, char *usage)
     int err;
     dm_hash_t hash;
     char instances[MAX_DM_PATH];
-    
+
     // Exit if parameter path is incorrect
     err = DM_PRIV_FormDB_FromPath(param, &hash, instances, sizeof(instances));
     if (err != USP_ERR_OK)
@@ -1499,6 +1631,7 @@ int ExecuteCli_ProtoTrace(char *arg1, char *arg2, char *usage)
 int ExecuteCli_Stop(char *arg1, char *arg2, char *usage)
 {
     // Signal that USP Agent should stop, once no queued messages to send
+    BDC_EXEC_ScheduleExit();
     MTP_EXEC_ScheduleExit();
     MTP_EXEC_ActivateScheduledActions();
 
@@ -1522,7 +1655,7 @@ char *SplitOffTrailingNumber(char *s)
 {
     int len;
     int i;
-    char c;    
+    char c;
 
     // Exit if empty string
     len = strlen(s);
@@ -1555,7 +1688,7 @@ char *SplitOffTrailingNumber(char *s)
             s[i] = '\0';
 
             // Exit if the number is an empty string
-            // NOTE: This should be an unneceaary test since we have already determined that there is at least one digit    
+            // NOTE: This should be an unneceaary test since we have already determined that there is at least one digit
             if (i == len-1)
             {
                 return NULL;
@@ -1566,7 +1699,7 @@ char *SplitOffTrailingNumber(char *s)
         }
     }
 
-    // If the code gets here, the whole of the string was composed of digits        
+    // If the code gets here, the whole of the string was composed of digits
     return NULL;
 }
 
@@ -1576,7 +1709,7 @@ char *SplitOffTrailingNumber(char *s)
 **
 ** Splits a set expression into a search path identifying the objects to modify
 ** and the name of the parameter whose value to modify in the objects
-** NOTE: This function is complicated by the fact that the parameter name may be in the middle of 
+** NOTE: This function is complicated by the fact that the parameter name may be in the middle of
 **       the string, if the string contains expression components (ie '::{ }' )
 **
 ** Example: Splits Device.Test.{i}.Param1::{i.Param2 == 50} into

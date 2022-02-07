@@ -14,9 +14,9 @@ AM_CFLAGS = -Wall -Wfatal-errors
 
 bin_PROGRAMS = obuspa
 
-OBUSPA_LOCAL_STATE_DIR = "$(localstatedir)/obuspa/"
+OBUSPA_LOCAL_STATE_DIR = "$(localstatedir)/obuspa"
 
-obuspa_SOURCES = src/core/main.c \
+SOURCES = src/core/main.c \
                     src/core/mtp_exec.c \
                     src/core/dm_exec.c \
                     src/core/bdc_exec.c \
@@ -32,6 +32,8 @@ obuspa_SOURCES = src/core/main.c \
                     src/core/handle_get_supported_protocol.c \
                     src/core/handle_get_instances.c \
                     src/core/handle_get_supported_dm.c \
+                    src/core/group_get_vector.c \
+                    src/core/group_set_vector.c \
                     src/core/proto_trace.c \
                     src/core/data_model.c \
                     src/core/error_resp.c \
@@ -44,7 +46,6 @@ obuspa_SOURCES = src/core/main.c \
                     src/core/device_stomp.c \
                     src/core/device_subscription.c \
                     src/core/device_security.c \
-                    src/core/device_firmware.c \
                     src/core/device_ctrust.c \
                     src/core/device_bulkdata.c \
                     src/core/device_selftest_example.c \
@@ -82,10 +83,14 @@ obuspa_SOURCES = src/core/main.c \
                     src/core/coap_common.c \
                     src/core/coap_client.c \
                     src/core/coap_server.c \
-                    src/core/uri.c
+                    src/core/uri.c \
+                    src/core/mqtt.c \
+                    src/core/device_mqtt.c \
+                    src/core/wsclient.c
 
-obuspa_CPPFLAGS = $(openssl_CFLAGS) $(sqlite3_CFLAGS) $(libcurl_CFLAGS) $(zlib_CFLAGS)
-obuspa_CPPFLAGS += -DENABLE_COAP
+
+obuspa_SOURCES = $(SOURCES)
+obuspa_CPPFLAGS = $(openssl_CFLAGS) $(sqlite3_CFLAGS) $(libcurl_CFLAGS) $(zlib_CFLAGS) $(libmosquitto_CFLAGS) $(libwebsockets_CFLAGS) 
 obuspa_CPPFLAGS += -DOBUSPA_LOCAL_STATE_DIR=\"$(OBUSPA_LOCAL_STATE_DIR)\"
 obuspa_CPPFLAGS +=  $(AM_CPPFLAGS) \
                       -Werror \
@@ -100,17 +105,17 @@ obuspa_CPPFLAGS +=  $(AM_CPPFLAGS) \
 obuspa_LDFLAGS = -rdynamic
 
 obuspa_LDADD = -lm -ldl -lpthread -lrt
-obuspa_LDADD += $(openssl_LIBS) $(sqlite3_LIBS) $(libcurl_LIBS) $(zlib_LIBS)
+obuspa_LDADD += $(openssl_LIBS) $(sqlite3_LIBS) $(libcurl_LIBS) $(zlib_LIBS) $(libmosquitto_LIBS) $(libwebsockets_LIBS)
 
 obuspa_LDFLAGS += -Wl,-rpath=/usr/local/lib
 
 # Create obuspa directory for usp.db etc on install
 # This depends on your prefix setting (default localstatedir=/usr/local/var/)
-# Default OBUSPA_LOCAL_STATE_DIR=/usr/local/var/obuspa/
+# Default OBUSPA_LOCAL_STATE_DIR=/usr/local/var/obuspa
 install-data-local:
 	${mkdir_p} "${DESTDIR}/${OBUSPA_LOCAL_STATE_DIR}"
 	if [ -n "${SUDO_USER}" ]; then \
-		chown -R "${SUDO_USER}" "${DESTDIR}/${OBUSPA_LOCAL_STATE_DIR}"; \
+		chown "${SUDO_USER}" "${DESTDIR}/${OBUSPA_LOCAL_STATE_DIR}"; \
 	fi
 
 uninstall-local:
@@ -118,3 +123,4 @@ uninstall-local:
 
 # Import vendor makefile
 include src/vendor/vendor.am
+
