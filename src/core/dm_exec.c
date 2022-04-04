@@ -59,6 +59,8 @@
 #include "dm_trans.h"
 #include "nu_ipaddr.h"
 #include "stomp.h"
+#include "proto_trace.h"
+#include "usp-record.pb-c.h"
 
 #ifdef ENABLE_COAP
 #include "usp_coap.h"
@@ -549,6 +551,53 @@ int USP_SIGNAL_ObjectDeleted(char *path)
 **************************************************************************/
 void DM_EXEC_PostUspRecord(unsigned char *pbuf, int pbuf_len, ctrust_role_t role, mtp_reply_to_t *mrt)
 {
+#if 1
+    // NOTE: This function differs in the USP Test Controller than in the OBUSPA agent codebase
+    //       It cannot post to the data model thread, because the test controller runs instead of the data model
+    //       Instead, it logs the received USP record and message
+
+    UspRecord__Record *rec;
+    Usp__Msg *usp;
+
+    // Exit if unable to unpack the USP record
+    rec = usp_record__record__unpack(pbuf_allocator, pbuf_len, pbuf);
+    if (rec == NULL)
+    {
+        USP_ERR_SetMessage("%s: usp_record__session_record__unpack failed. Ignoring USP Record", __FUNCTION__);
+        return;
+    }
+
+    // Print USP record in human readable form
+    PROTO_TRACE_ProtobufMessage(&rec->base);
+
+    // Exit if no USP message contained in USP Record
+    if ((rec->record_type_case != USP_RECORD__RECORD__RECORD_TYPE_NO_SESSION_CONTEXT) ||
+        (rec->no_session_context == NULL) || (rec->no_session_context->payload.len == 0) || 
+        (rec->no_session_context->payload.data==NULL))
+    {
+        USP_ERR_SetMessage("%s: USP Record contained no USP message (or message was in a E2E session context). Ignoring USP Record", __FUNCTION__);
+        usp_record__record__free_unpacked(rec, pbuf_allocator);
+        return;
+    }
+
+    // Exit if unable to unpack the USP message
+    usp = usp__msg__unpack(pbuf_allocator, rec->no_session_context->payload.len, rec->no_session_context->payload.data);
+    if (usp == NULL)
+    {
+        USP_ERR_SetMessage("%s: usp__msg__unpack failed", __FUNCTION__);
+        usp_record__record__free_unpacked(rec, pbuf_allocator);
+        return;
+    }
+
+    // Print USP message in human readable form
+    PROTO_TRACE_ProtobufMessage(&usp->base);
+
+    // Free unpacked protobuf structures
+    usp__msg__free_unpacked(usp, pbuf_allocator);
+    usp_record__record__free_unpacked(rec, pbuf_allocator);
+    return;
+
+#else
     dm_exec_msg_t  msg;
     process_usp_record_msg_t *pur;
     int bytes_sent;
@@ -591,6 +640,7 @@ void DM_EXEC_PostUspRecord(unsigned char *pbuf, int pbuf_len, ctrust_role_t role
         USP_LOG_Error("%s(%d): send failed : (err=%d) %s", __FUNCTION__, __LINE__, errno, USP_ERR_ToString(errno, buf, sizeof(buf)) );
         return;
     }
+#endif
 }
 
 /*********************************************************************//**
